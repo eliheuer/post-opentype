@@ -1,6 +1,6 @@
 //! WASM bindings: load a .ntf neural font and shape/render text.
 
-use neuraltype_core::shape::layout;
+use neuraltype_core::shape::{layout, Dir};
 use neuraltype_core::{font, model::NeuralFont, BASELINE_ROW, GRID_H, MAX_ELONG};
 use wasm_bindgen::prelude::*;
 
@@ -20,10 +20,17 @@ impl NtfFont {
     }
 
     /// Shape `text` at elongation `elong` ∈ [0, max_elong].
-    /// Returns JSON: { width, grid_h, baseline, glyphs: [{ch, form, path}] }
-    /// with paths as SVG strings in grid units (y-down).
-    pub fn shape(&self, text: &str, elong: f64) -> String {
-        let line = layout(&self.inner, text, elong.clamp(0.0, MAX_ELONG as f64));
+    /// Returns JSON: { width, grid_h, baseline, path, glyphs } where
+    /// `path` is ONE SVG path for the whole line (connected letters
+    /// are one continuous contour) in grid units (y-down), and
+    /// `glyphs` is cluster metadata [{ch, form, x, advance}].
+    pub fn shape(&self, text: &str, elong: f64, dir: &str) -> String {
+        let dir = match dir {
+            "rtl" => Dir::Rtl,
+            "ltr" => Dir::Ltr,
+            _ => Dir::Auto,
+        };
+        let line = layout(&self.inner, text, elong.clamp(0.0, MAX_ELONG as f64), dir);
         let glyphs: Vec<serde_json::Value> = line
             .glyphs
             .iter()
@@ -31,7 +38,8 @@ impl NtfFont {
                 serde_json::json!({
                     "ch": g.ch.to_string(),
                     "form": format!("{:?}", g.form),
-                    "path": g.path.to_svg(),
+                    "x": g.x,
+                    "advance": g.advance,
                 })
             })
             .collect();
@@ -39,6 +47,7 @@ impl NtfFont {
             "width": line.width,
             "grid_h": GRID_H,
             "baseline": BASELINE_ROW,
+            "path": line.path.to_svg(),
             "glyphs": glyphs,
         })
         .to_string()

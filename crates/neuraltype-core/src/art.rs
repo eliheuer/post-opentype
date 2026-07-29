@@ -39,6 +39,10 @@ pub enum Class {
     Heh,
     Waw,
     Yeh,
+    /// Latin capital, 0 = A … 25 = Z. Latin letters have one form
+    /// (no joining); their elongation stretches designated horizontal
+    /// strokes instead of a baseline connector.
+    Latin(u8),
 }
 
 /// ASCII art for one contextual form: `rows[0]` is grid row `top`.
@@ -85,19 +89,41 @@ pub fn letter_of_char(c: char) -> Option<(Class, Dots)> {
         'و' | 'ؤ' => (Waw, 0),
         'ي' | 'ئ' => (Yeh, -2),
         'ى' => (Yeh, 0),
+        'A'..='Z' => (Latin(c as u8 - b'A'), 0),
+        'a'..='z' => (Latin(c as u8 - b'a'), 0),
         _ => return None,
     })
 }
 
 /// Letters that never connect to the following (left) letter.
 pub fn joins_left(class: Class) -> bool {
-    !matches!(class, Class::Alef | Class::Dal | Class::Reh | Class::Waw)
+    !matches!(
+        class,
+        Class::Alef | Class::Dal | Class::Reh | Class::Waw | Class::Latin(_)
+    )
+}
+
+/// Letters that can receive a connection from the preceding letter.
+pub fn joins_right(class: Class) -> bool {
+    !matches!(class, Class::Latin(_))
+}
+
+/// Does elongation apply to this glyph? Arabic stretches the baseline
+/// connection (kashida) on joined forms; Latin stretches designated
+/// horizontal strokes of its single form.
+pub fn elongatable(class: Class, form: Form) -> bool {
+    match class {
+        Class::Latin(i) => form == Form::Isolated && latin_art(i).1.is_some(),
+        _ => form.joins_prev(),
+    }
 }
 
 /// The full inventory of supported codepoints (the model's alphabet).
 pub const ALPHABET: &[char] = &[
     'ا', 'ب', 'ت', 'ث', 'ج', 'ح', 'خ', 'د', 'ذ', 'ر', 'ز', 'س', 'ش', 'ص', 'ض', 'ط', 'ظ', 'ع',
-    'غ', 'ف', 'ق', 'ك', 'ل', 'م', 'ن', 'ه', 'ة', 'و', 'ي', 'ى',
+    'غ', 'ف', 'ق', 'ك', 'ل', 'م', 'ن', 'ه', 'ة', 'و', 'ي', 'ى', 'A', 'B', 'C', 'D', 'E', 'F',
+    'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
+    'Y', 'Z',
 ];
 
 macro_rules! art {
@@ -215,34 +241,98 @@ pub fn class_art(class: Class, form: Form) -> Option<FormArt> {
         (Waw, Isolated) => art!(8, [".###", ".#.#", "####", "#...", "##.."]),
         (Waw, Final) => art!(8, [".###.", ".#.#.", "#####", "#....", "##..."]),
         (Waw, _) => None,
+
+        // Latin capitals: one form, cap height = alif height (rows 2–10).
+        (Latin(i), Isolated) => Some(FormArt { top: 2, rows: latin_art(i).0 }),
+        (Latin(_), _) => None,
+    }
+}
+
+/// Latin capital art (rows 2–10, 1-cell strokes) and the letter's
+/// stretch column: elongation duplicates that art column, so crossbars
+/// and arms extend while stems stay one cell wide. None = the letter
+/// does not stretch (diagonal or single-stem letters).
+pub fn latin_art(i: u8) -> (&'static [&'static str], Option<usize>) {
+    match i {
+        0 /* A */ => (&["#####", "#...#", "#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"], Some(2)),
+        1 /* B */ => (&["####.", "#...#", "#...#", "#...#", "####.", "#...#", "#...#", "#...#", "####."], Some(2)),
+        2 /* C */ => (&["#####", "#....", "#....", "#....", "#....", "#....", "#....", "#....", "#####"], Some(2)),
+        3 /* D */ => (&["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", "####."], Some(2)),
+        4 /* E */ => (&["#####", "#....", "#....", "#....", "#####", "#....", "#....", "#....", "#####"], Some(2)),
+        5 /* F */ => (&["#####", "#....", "#....", "#....", "#####", "#....", "#....", "#....", "#...."], Some(2)),
+        6 /* G */ => (&["#####", "#....", "#....", "#....", "#.###", "#...#", "#...#", "#...#", "#####"], Some(2)),
+        7 /* H */ => (&["#...#", "#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#", "#...#"], Some(2)),
+        8 /* I */ => (&["#", "#", "#", "#", "#", "#", "#", "#", "#"], None),
+        9 /* J */ => (&["....#", "....#", "....#", "....#", "....#", "....#", "....#", "#...#", "#####"], Some(2)),
+        10 /* K */ => (&["#...#", "#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#", "#...#"], None),
+        11 /* L */ => (&["#....", "#....", "#....", "#....", "#....", "#....", "#....", "#....", "#####"], Some(2)),
+        12 /* M */ => (&["#######", "#..#..#", "#..#..#", "#..#..#", "#.....#", "#.....#", "#.....#", "#.....#", "#.....#"], Some(1)),
+        13 /* N */ => (&["#...#", "##..#", "##..#", "#.#.#", "#.#.#", "#.#.#", "#..##", "#..##", "#...#"], None),
+        14 /* O */ => (&["#####", "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", "#####"], Some(2)),
+        15 /* P */ => (&["#####", "#...#", "#...#", "#...#", "#####", "#....", "#....", "#....", "#...."], Some(2)),
+        16 /* Q */ => (&["#####", "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", "#..##", "#####"], Some(2)),
+        17 /* R */ => (&["#####", "#...#", "#...#", "#####", "#.##.", "#..##", "#...#", "#...#", "#...#"], Some(1)),
+        18 /* S */ => (&["#####", "#....", "#....", "#....", "#####", "....#", "....#", "....#", "#####"], Some(2)),
+        19 /* T */ => (&["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."], Some(3)),
+        20 /* U */ => (&["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", "#####"], Some(2)),
+        21 /* V */ => (&["#...#", "#...#", "#...#", "##.##", ".#.#.", ".#.#.", ".###.", "..#..", "..#.."], None),
+        22 /* W */ => (&["#.....#", "#.....#", "#.....#", "#.....#", "#.....#", "#..#..#", "#..#..#", "#..#..#", "#######"], Some(1)),
+        23 /* X */ => (&["#...#", "#...#", "##.##", ".#.#.", ".###.", ".#.#.", "##.##", "#...#", "#...#"], None),
+        24 /* Y */ => (&["#...#", "#...#", "#...#", "#...#", "#####", "..#..", "..#..", "..#..", "..#.."], Some(1)),
+        _ /* Z */ => (&["#####", "....#", "...##", "...#.", "..##.", "..#..", ".##..", ".#...", "#####"], None),
     }
 }
 
 /// Render a glyph image from the teacher: class art, right-aligned on
-/// the canvas, with `elong` extra kashida columns at the entry side
-/// (only meaningful for forms that join the previous letter) and i'jam
-/// dots stamped clear of the body.
+/// the canvas, elongated per the class's stretch behaviour (Arabic:
+/// kashida columns at the entry side; Latin: duplicated stretch
+/// column), with i'jam dots stamped clear of the body.
 pub fn render(class: Class, dots: Dots, form: Form, elong: usize) -> Option<GlyphImage> {
     let art = class_art(class, form)?;
-    let aw = art.rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    let elong = if form.joins_prev() { elong } else { 0 };
+    let base_w = art.rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    // Materialize the art so elongation can edit it.
+    let mut rows: Vec<Vec<bool>> = art
+        .rows
+        .iter()
+        .map(|r| {
+            let mut v: Vec<bool> = r.bytes().map(|b| b == b'#').collect();
+            v.resize(base_w, false);
+            v
+        })
+        .collect();
+    // Where does the elongation go for this glyph?
+    let (kashida, stretch_col) = match class {
+        Class::Latin(i) => (0, latin_art(i).1.filter(|_| elong > 0)),
+        _ if form.joins_prev() => (elong, None),
+        _ => (0, None),
+    };
+    if let Some(col) = stretch_col {
+        for row in &mut rows {
+            let v = row[col];
+            for _ in 0..elong {
+                row.insert(col, v);
+            }
+        }
+    }
+    let aw = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+
     let mut img = GlyphImage::empty();
-    // Body right-aligned, shifted left by the elongation.
-    let x0 = GRID_W - aw - elong;
-    for (dy, row) in art.rows.iter().enumerate() {
-        for (dx, ch) in row.bytes().enumerate() {
-            if ch == b'#' {
+    // Body right-aligned, shifted left by any kashida columns.
+    let x0 = GRID_W - aw - kashida;
+    for (dy, row) in rows.iter().enumerate() {
+        for (dx, &on) in row.iter().enumerate() {
+            if on {
                 img.set(x0 + dx, art.top + dy);
             }
         }
     }
     // Kashida: extend the baseline through the elongation columns.
-    for e in 0..elong {
+    for e in 0..kashida {
         img.set(GRID_W - 1 - e, BASELINE_ROW);
     }
     // Dots, placed relative to the body bounding box.
-    stamp_dots(&mut img, dots, x0, aw, art.top, art.top + art.rows.len() - 1);
-    img.advance = (aw + elong) as f64;
+    stamp_dots(&mut img, dots, x0, aw, art.top, art.top + rows.len() - 1);
+    img.advance = (aw + kashida) as f64;
     Some(img)
 }
 

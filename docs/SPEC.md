@@ -57,7 +57,7 @@ JSON header fields:
 | `script`   | `"arabic"`                                         |
 | `style`    | e.g. `"square-kufic"`                              |
 | `alphabet` | string of supported codepoints, index = model id   |
-| `layers`   | layer sizes, e.g. `[35, 128, 128, 225]`            |
+| `layers`   | layer sizes, e.g. `[61, 128, 128, 236]`            |
 
 Hidden layers are ReLU; the output layer is linear. (Quantization to
 f16/int8 is an obvious follow-up; v0 keeps f32 for simplicity.)
@@ -69,17 +69,20 @@ coarse binary grid (strokes 1 cell wide, counters 1 cell), so the
 generative representation is trivial and every part of the pipeline is
 inspectable.
 
-**Input** (35 floats):
-- one-hot letter identity over the alphabet (30) — note dots are
-  *generated*, not input: ب/ت/ث are distinct ids whose shared rasm the
-  model discovers in training;
+**Input** (61 floats):
+- one-hot letter identity over the alphabet (56: Arabic + Latin
+  capitals) — note dots are *generated*, not input: ب/ت/ث are distinct
+  ids whose shared rasm the model discovers in training;
 - one-hot joining form (4): isolated / initial / medial / final;
-- elongation scalar ∈ [0,1]: kashida columns / MAX_ELONG.
+- elongation scalar ∈ [0,1]. Arabic joined forms stretch their baseline
+  connection (kashida); Latin letters stretch a declared column, so
+  crossbars extend while stems stay one cell wide.
 
-**Output** (225 floats):
+**Output** (236 floats):
 - 16×14 occupancy grid (threshold at 0.5), canvas right-aligned at the
   pen position, baseline at row 10, descender zone below;
-- advance width / 16.
+- advance width / 16, replicated over 12 slots (averaged at decode) so
+  its gradient is not drowned out by the grid cells.
 
 **Engine pipeline** (`neuraltype-core`):
 1. *Shape*: Unicode text → joining forms (standard Arabic joining
@@ -88,9 +91,11 @@ inspectable.
 3. *Trace*: exposed cell edges, oriented filled-side-left, chained
    into closed loops → rectilinear `kurbo::BezPath` (outer contours
    and holes get opposite windings; nonzero fill).
-4. *Layout*: RTL pen, connected letters abut (the model draws its own
-   connectors), 1-cell gap after non-connecting letters, 3-cell word
-   space.
+4. *Layout*: RTL pen (bidi-lite: Latin runs reverse; pure-Latin lines
+   render LTR), connected letters abut, 1-cell gap after non-connecting
+   letters, 3-cell word space. The whole line is composited into one
+   bitmap and traced once, so a joined word is one continuous contour —
+   not per-glyph outlines that merely touch.
 
 **Training** is distillation from a procedural teacher: letterforms
 authored as ASCII-art grids (exactly a square-Kufic chart), composed

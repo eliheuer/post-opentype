@@ -29,7 +29,7 @@ concept legible):
   - a procedural **teacher**: square-Kufic letterforms authored as
     ASCII-art grids, composed with joining behaviour, i'jam dots, and
     continuous kashida elongation;
-  - a **neural font**: a ~50k-parameter MLP mapping
+  - a **neural font**: a ~55k-parameter MLP mapping
     *(letter, joining form, elongation) → occupancy grid + advance*;
   - Arabic **shaping** (joining-form analysis) and RTL layout;
   - a **tracer** that converts generated grids into bezier outlines.
@@ -47,8 +47,9 @@ cp build/kufic.ntf demo/
 python3 -m http.server -d demo 8123   # open http://localhost:8123
 ```
 
-Current fidelity: 322/324 (letter, form, elongation) contexts
-reproduced cell-exactly by the model.
+Current fidelity: 430/430 (letter, form, elongation) contexts —
+Arabic and Latin capitals — reproduced exactly by the model, grid
+cells and advance widths both.
 
 ## Where this goes
 

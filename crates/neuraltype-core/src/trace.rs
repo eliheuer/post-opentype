@@ -14,16 +14,24 @@ use std::collections::HashMap;
 type Pt = (i32, i32);
 
 pub fn trace_outline(img: &GlyphImage) -> BezPath {
+    trace_bitmap(GRID_W, GRID_H, |x, y| img.get(x, y))
+}
+
+/// Trace any bitmap — in particular a whole composited line, so that
+/// connected letters become one continuous contour, not per-glyph
+/// rectangles that merely abut.
+pub fn trace_bitmap(w: usize, h: usize, cell: impl Fn(usize, usize) -> bool) -> BezPath {
     // Collect directed boundary edges: filled area on the left.
     let mut by_start: HashMap<Pt, Vec<Pt>> = HashMap::new();
     let mut add = |a: Pt, b: Pt| by_start.entry(a).or_default().push(b);
-    for y in 0..GRID_H as i32 {
-        for x in 0..GRID_W as i32 {
-            if !img.get(x as usize, y as usize) {
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            if !cell(x as usize, y as usize) {
                 continue;
             }
             let filled = |x: i32, y: i32| {
-                x >= 0 && y >= 0 && img.get(x as usize, y as usize)
+                x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h
+                    && cell(x as usize, y as usize)
             };
             if !filled(x, y - 1) {
                 add((x, y), (x + 1, y)); // top edge, heading right

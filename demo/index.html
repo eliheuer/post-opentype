@@ -73,7 +73,7 @@ for (const s of ['بسم الله الرحمن الرحيم', 'قلم', 'نست�
 function render() {
   const elong = parseFloat(elongEl.value);
   evEl.textContent = elong.toFixed(1);
-  const line = JSON.parse(font.shape(textEl.value, elong));
+  const line = JSON.parse(font.shape(textEl.value, elong, 'auto'));
 
   const cssW = document.getElementById('stage').clientWidth;
   const cssH = Math.round(cssW * 0.34);
@@ -116,7 +116,7 @@ function render() {
   ctx.translate(ox, oy);
   ctx.scale(cell, cell);
   ctx.fillStyle = '#e8b84b';
-  for (const g of line.glyphs) ctx.fill(new Path2D(g.path));
+  ctx.fill(new Path2D(line.path));
   ctx.restore();
 }
 

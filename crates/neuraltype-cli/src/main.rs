@@ -7,7 +7,7 @@
 
 use neuraltype_core::art::{self, ALPHABET};
 use neuraltype_core::model::{self, Mlp, NeuralFont};
-use neuraltype_core::shape::{layout, GlyphSource, Line};
+use neuraltype_core::shape::{layout, Dir, GlyphSource, Line};
 use neuraltype_core::{font, Form, GlyphImage, MAX_ELONG};
 
 /// The teacher as a glyph source.
@@ -47,7 +47,8 @@ fn dataset() -> Vec<(Vec<f32>, Vec<f32>)> {
     for (li, &c) in ALPHABET.iter().enumerate() {
         let (class, dots) = art::letter_of_char(c).unwrap();
         for form in Form::ALL {
-            let elongs: &[usize] = if form.joins_prev() { &[0, 1, 2, 3, 4] } else { &[0] };
+            let elongs: &[usize] =
+                if art::elongatable(class, form) { &[0, 1, 2, 3, 4] } else { &[0] };
             for &e in elongs {
                 if let Some(img) = art::render(class, dots, form, e) {
                     data.push((
@@ -69,14 +70,13 @@ fn train(out_path: &str) {
 
     // Adam, full-batch.
     let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
-    let lr = 3e-3f32;
     let mut m: Vec<(Vec<f32>, Vec<f32>)> = mlp
         .layers
         .iter()
         .map(|l| (vec![0.0; l.w.len()], vec![0.0; l.b.len()]))
         .collect();
     let mut v = m.clone();
-    let epochs = 8000;
+    let epochs = 20000;
     for epoch in 1..=epochs {
         let mut grads: Vec<(Vec<f32>, Vec<f32>)> = mlp
             .layers
@@ -91,6 +91,8 @@ fn train(out_path: &str) {
         let scale = 1.0 / data.len() as f32;
         let t = epoch as i32;
         let (c1, c2) = (1.0 - b1.powi(t), 1.0 - b2.powi(t));
+        // Step-decayed learning rate: coarse fit, then settle exactly.
+        let lr: f32 = if epoch <= 8000 { 3e-3 } else if epoch <= 15000 { 1e-3 } else { 3e-4 };
         for (li, l) in mlp.layers.iter_mut().enumerate() {
             let (gw, gb) = &grads[li];
             let (mw, mb) = &mut m[li];
@@ -120,7 +122,8 @@ fn train(out_path: &str) {
         let _ = li;
         let (class, dots) = art::letter_of_char(c).unwrap();
         for form in Form::ALL {
-            let elongs: &[usize] = if form.joins_prev() { &[0, 1, 2, 3, 4] } else { &[0] };
+            let elongs: &[usize] =
+                if art::elongatable(class, form) { &[0, 1, 2, 3, 4] } else { &[0] };
             for &e in elongs {
                 let Some(want) = art::render(class, dots, form, e) else { continue };
                 let got = nf.glyph(c, form, e as f64).unwrap();
@@ -134,6 +137,8 @@ fn train(out_path: &str) {
                 cells_wrong += wrong;
                 if wrong == 0 && want.advance == got.advance {
                     exact += 1;
+                } else {
+                    println!("  miss: {c} {form:?} e={e} cells={wrong} adv want {} got {}", want.advance, got.advance);
                 }
             }
         }
@@ -163,12 +168,10 @@ fn svg_of_lines(lines: &[(String, Line)], scale: f64) -> String {
             r#"<g transform="translate({x},{ty}) scale({scale})">"#,
             x = (maxw - line.width + 2.0) * scale, // right-align
         ));
-        for g in &line.glyphs {
-            s.push_str(&format!(
-                r#"<path d="{}" fill="black" fill-rule="nonzero"/>"#,
-                g.path.to_svg()
-            ));
-        }
+        s.push_str(&format!(
+            r#"<path d="{}" fill="black" fill-rule="nonzero"/>"#,
+            line.path.to_svg()
+        ));
         s.push_str("</g>");
         s.push_str(&format!(
             r##"<text x="4" y="{}" font-size="10" fill="#888" font-family="monospace">{}</text>"##,
@@ -188,8 +191,8 @@ fn sheet(font_path: &str, out_path: &str) {
     for &c in ALPHABET {
         // A carrier context showing iso, init+med+fin: "c  ccc" style.
         let sample = format!("{c} {c}{c}{c}");
-        lines.push((format!("teacher {c}"), layout(&Teacher, &sample, 0.0)));
-        lines.push((format!("model   {c}"), layout(&nf, &sample, 0.0)));
+        lines.push((format!("teacher {c}"), layout(&Teacher, &sample, 0.0, Dir::Auto)));
+        lines.push((format!("model   {c}"), layout(&nf, &sample, 0.0, Dir::Auto)));
     }
     std::fs::write(out_path, svg_of_lines(&lines, 8.0)).unwrap();
     println!("wrote {out_path}");
@@ -200,8 +203,8 @@ fn render(text: &str, font_path: &str, out_path: &str, elong: f64) {
         .unwrap();
     let elong = elong.clamp(0.0, MAX_ELONG as f64);
     let lines = vec![
-        ("model".to_string(), layout(&nf, text, elong)),
-        ("teacher".to_string(), layout(&Teacher, text, elong)),
+        ("model".to_string(), layout(&nf, text, elong, Dir::Auto)),
+        ("teacher".to_string(), layout(&Teacher, text, elong, Dir::Auto)),
     ];
     std::fs::write(out_path, svg_of_lines(&lines, 10.0)).unwrap();
     println!("wrote {out_path}");

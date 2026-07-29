@@ -10,8 +10,11 @@ use crate::shape::GlyphSource;
 use crate::{Form, GlyphImage, GRID_H, GRID_W, MAX_ELONG};
 
 pub const N_IN: usize = ALPHABET_LEN + 4 + 1;
-pub const N_OUT: usize = GRID_W * GRID_H + 1;
-pub const ALPHABET_LEN: usize = 30;
+/// The advance width gets several output slots (averaged at decode)
+/// so its gradient is not drowned out by the 224 grid cells.
+pub const ADV_SLOTS: usize = 12;
+pub const N_OUT: usize = GRID_W * GRID_H + ADV_SLOTS;
+pub const ALPHABET_LEN: usize = 56;
 
 /// A dense layer: `out = act(W·x + b)`, weights row-major [n_out × n_in].
 #[derive(Clone)]
@@ -151,14 +154,17 @@ pub fn decode_output(y: &[f32]) -> GlyphImage {
     for (i, v) in y[..GRID_W * GRID_H].iter().enumerate() {
         img.cells[i] = *v > 0.5;
     }
-    img.advance = (y[GRID_W * GRID_H] as f64 * GRID_W as f64).round().max(1.0);
+    let adv: f32 = y[GRID_W * GRID_H..].iter().sum::<f32>() / ADV_SLOTS as f32;
+    img.advance = (adv as f64 * GRID_W as f64).round().max(1.0);
     img
 }
 
 /// Encode a teacher glyph image as a training target.
 pub fn encode_target(img: &GlyphImage) -> Vec<f32> {
     let mut t: Vec<f32> = img.cells.iter().map(|&c| if c { 1.0 } else { 0.0 }).collect();
-    t.push(img.advance as f32 / GRID_W as f32);
+    for _ in 0..ADV_SLOTS {
+        t.push(img.advance as f32 / GRID_W as f32);
+    }
     t
 }
 
