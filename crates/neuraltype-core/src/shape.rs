@@ -21,6 +21,16 @@ pub struct GlyphInfo {
     pub advance: f64,
 }
 
+/// Per-logical-character horizontal span, for cursor placement,
+/// selection highlighting, and hit testing in editors.
+pub struct Span {
+    /// Logical (source-order) character index.
+    pub index: usize,
+    /// Left edge in line units.
+    pub x: f64,
+    pub width: f64,
+}
+
 pub struct Line {
     /// One outline for the whole line, traced from the composited
     /// bitmap of every generated glyph — connected letters are one
@@ -29,7 +39,11 @@ pub struct Line {
     pub path: BezPath,
     /// Total width of the line in font units.
     pub width: f64,
+    /// Resolved base direction.
+    pub rtl: bool,
     pub glyphs: Vec<GlyphInfo>,
+    /// One span per source character (letters, spaces, unknowns).
+    pub spans: Vec<Span>,
 }
 
 /// Width of a word space, in cells.
@@ -46,29 +60,30 @@ pub enum Dir {
     Ltr,
 }
 
-/// Resolve the visual character order of a line (bidi-lite).
-/// The layout pen always runs right-to-left, so: RTL text keeps its
-/// logical order with Latin runs reversed in place; LTR text is
-/// reversed wholesale, which yields left-to-right rendering.
-fn visual_order(text: &str, dir: Dir) -> Vec<char> {
-    let mut chars: Vec<char> = text.chars().collect();
+/// Resolve the visual character order of a line (bidi-lite), keeping
+/// each character's logical index for cluster mapping. The layout pen
+/// always runs right-to-left, so: RTL text keeps its logical order
+/// with Latin runs reversed in place; LTR text is reversed wholesale,
+/// which yields left-to-right rendering. Returns (visual chars, rtl).
+fn visual_order(text: &str, dir: Dir) -> (Vec<(usize, char)>, bool) {
+    let mut chars: Vec<(usize, char)> = text.chars().enumerate().collect();
     let is_latin = |c: char| matches!(letter_of_char(c), Some((Class::Latin(_), _)));
     let is_arabic = |c: char| matches!(letter_of_char(c), Some((cl, _)) if !matches!(cl, Class::Latin(_)));
     let rtl = match dir {
         Dir::Rtl => true,
         Dir::Ltr => false,
-        Dir::Auto => chars.iter().any(|&c| is_arabic(c)),
+        Dir::Auto => chars.iter().any(|&(_, c)| is_arabic(c)),
     };
     if !rtl {
         chars.reverse();
-        return chars;
+        return (chars, rtl);
     }
     // Reverse each maximal run of Latin letters (spaces break runs).
     let mut i = 0;
     while i < chars.len() {
-        if is_latin(chars[i]) {
+        if is_latin(chars[i].1) {
             let mut j = i;
-            while j < chars.len() && is_latin(chars[j]) {
+            while j < chars.len() && is_latin(chars[j].1) {
                 j += 1;
             }
             chars[i..j].reverse();
@@ -77,30 +92,30 @@ fn visual_order(text: &str, dir: Dir) -> Vec<char> {
             i += 1;
         }
     }
-    chars
+    (chars, rtl)
 }
 
-/// Compute the joining form of each letter in `text` (already in
-/// visual order). Non-letters (spaces, unsupported chars) and
-/// non-joining scripts break joining.
-pub fn shaped_forms(text: &str, dir: Dir) -> Vec<(char, Option<Form>)> {
-    let chars = visual_order(text, dir);
+/// Compute the joining form of each letter in `text`, in visual order,
+/// keeping logical indices. Non-letters (spaces, unsupported chars)
+/// and non-joining scripts break joining.
+pub fn shaped_forms(text: &str, dir: Dir) -> (Vec<(usize, char, Option<Form>)>, bool) {
+    let (chars, rtl) = visual_order(text, dir);
     let is_letter = |i: i32| -> bool {
-        i >= 0 && (i as usize) < chars.len() && letter_of_char(chars[i as usize]).is_some()
+        i >= 0 && (i as usize) < chars.len() && letter_of_char(chars[i as usize].1).is_some()
     };
     let joins_to_next = |i: usize| -> bool {
         // letter i connects to letter i+1
         is_letter(i as i32)
             && is_letter(i as i32 + 1)
-            && joins_left(letter_of_char(chars[i]).unwrap().0)
-            && joins_right(letter_of_char(chars[i + 1]).unwrap().0)
+            && joins_left(letter_of_char(chars[i].1).unwrap().0)
+            && joins_right(letter_of_char(chars[i + 1].1).unwrap().0)
     };
-    chars
+    let shaped = chars
         .iter()
         .enumerate()
-        .map(|(i, &c)| {
+        .map(|(i, &(li, c))| {
             if letter_of_char(c).is_none() {
-                return (c, None);
+                return (li, c, None);
             }
             let prev = i > 0 && joins_to_next(i - 1);
             let next = joins_to_next(i);
@@ -110,22 +125,28 @@ pub fn shaped_forms(text: &str, dir: Dir) -> Vec<(char, Option<Form>)> {
                 (true, true) => Form::Medial,
                 (true, false) => Form::Final,
             };
-            (c, Some(form))
+            (li, c, Some(form))
         })
-        .collect()
+        .collect();
+    (shaped, rtl)
 }
 
 /// Shape and lay out a line of text right-to-left.
 /// `elong` in [0, MAX_ELONG] is the kashida elongation applied at
 /// every connection — a continuous input to the generative font.
 pub fn layout(source: &dyn GlyphSource, text: &str, elong: f64, dir: Dir) -> Line {
-    let shaped = shaped_forms(text, dir);
+    let (shaped, rtl) = shaped_forms(text, dir);
     // Pass 1: generate every glyph and record pen positions (the pen
-    // moves leftward from 0; advances are whole cells).
+    // moves leftward from 0; advances are whole cells). Every source
+    // character — letter, space, or unknown — gets a span for cursor
+    // placement and selection.
     let mut placed: Vec<(GlyphImage, f64, char, Form)> = Vec::new();
+    let mut spans: Vec<Span> = Vec::new();
     let mut pen_x = 0.0;
-    for (i, &(c, form)) in shaped.iter().enumerate() {
+    for (i, &(li, c, form)) in shaped.iter().enumerate() {
         let Some(form) = form else {
+            // Spaces (and unsupported chars) advance the pen.
+            spans.push(Span { index: li, x: pen_x - SPACE_ADV, width: SPACE_ADV });
             pen_x -= SPACE_ADV;
             continue;
         };
@@ -133,20 +154,28 @@ pub fn layout(source: &dyn GlyphSource, text: &str, elong: f64, dir: Dir) -> Lin
         // (kashida) or Latin stretch strokes.
         let class = letter_of_char(c).unwrap().0;
         let e = if elongatable(class, form) { elong } else { 0.0 };
-        let Some(img) = source.glyph(c, form, e) else { continue };
+        let Some(img) = source.glyph(c, form, e) else {
+            spans.push(Span { index: li, x: pen_x, width: 0.0 });
+            continue;
+        };
         let adv = img.advance;
         placed.push((img, pen_x, c, form));
+        spans.push(Span { index: li, x: pen_x - adv, width: adv });
         pen_x -= adv;
         // Gap after a letter that does not connect to the next letter.
         let connects = shaped
             .get(i + 1)
-            .map(|&(_, f)| matches!(f, Some(Form::Medial) | Some(Form::Final)))
+            .map(|&(_, _, f)| matches!(f, Some(Form::Medial) | Some(Form::Final)))
             .unwrap_or(false);
         if !connects && i + 1 < shaped.len() {
             pen_x -= LETTER_GAP;
         }
     }
     let width = -pen_x;
+    for s in &mut spans {
+        s.x += width;
+    }
+    spans.sort_by_key(|s| s.index);
 
     // Pass 2: composite all glyph bitmaps into one line-wide grid and
     // trace it once, so connections merge into continuous contours.
@@ -174,7 +203,7 @@ pub fn layout(source: &dyn GlyphSource, text: &str, elong: f64, dir: Dir) -> Lin
         });
     }
     let path = trace_bitmap(w_cells, GRID_H, |x, y| cells[y * w_cells + x]);
-    Line { path, width, glyphs }
+    Line { path, width, rtl, glyphs, spans }
 }
 
 /// Convenience: the line's outline as an SVG path string.

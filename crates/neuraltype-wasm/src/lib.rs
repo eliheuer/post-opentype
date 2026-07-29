@@ -43,12 +43,19 @@ impl NtfFont {
                 })
             })
             .collect();
+        let spans: Vec<serde_json::Value> = line
+            .spans
+            .iter()
+            .map(|s| serde_json::json!({ "i": s.index, "x": s.x, "w": s.width }))
+            .collect();
         serde_json::json!({
             "width": line.width,
             "grid_h": GRID_H,
             "baseline": BASELINE_ROW,
+            "rtl": line.rtl,
             "path": line.path.to_svg(),
             "glyphs": glyphs,
+            "spans": spans,
         })
         .to_string()
     }
