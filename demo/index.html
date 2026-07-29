@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NeuralType — a font that is a model</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; padding: 2rem 1rem; display: flex; flex-direction: column;
+    align-items: center; gap: 1rem; font-family: ui-monospace, monospace;
+    background: #111; color: #ddd;
+  }
+  h1 { font-size: 1rem; font-weight: normal; color: #888; margin: 0; }
+  #stage { width: min(920px, 96vw); background: #181818; border: 1px solid #333;
+           border-radius: 8px; }
+  canvas { width: 100%; display: block; }
+  input[type=text] {
+    width: min(920px, 96vw); box-sizing: border-box; font-size: 1.6rem;
+    padding: .5rem .8rem; direction: rtl; background: #181818; color: #eee;
+    border: 1px solid #333; border-radius: 8px; font-family: inherit;
+  }
+  .row { display: flex; gap: 1rem; align-items: center; width: min(920px, 96vw);
+         font-size: .85rem; color: #999; flex-wrap: wrap; }
+  input[type=range] { flex: 1; min-width: 10rem; accent-color: #e8b84b; }
+  #meta { font-size: .75rem; color: #666; max-width: min(920px, 96vw); }
+  label { white-space: nowrap; }
+  .samples { display: flex; gap: .6rem; flex-wrap: wrap; }
+  .samples button {
+    background: #222; color: #ccc; border: 1px solid #383838; border-radius: 6px;
+    padding: .25rem .6rem; font-family: inherit; font-size: 1rem; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<h1>NeuralType (.ntf) · post-OpenType demo — every outline below is generated live by a 50k-parameter neural net; there are no glyph tables</h1>
+<input type="text" id="text" value="بسم الله الرحمن الرحيم" spellcheck="false">
+<div class="row samples" id="samples"></div>
+<div class="row">
+  <label>kashida elongation <span id="ev">0.0</span></label>
+  <input type="range" id="elong" min="0" max="4" step="0.05" value="0">
+  <label><input type="checkbox" id="grid"> grid</label>
+</div>
+<div id="stage"><canvas id="canvas"></canvas></div>
+<div id="meta">loading…</div>
+
+<script type="module">
+import init, { NtfFont } from './pkg/neuraltype_wasm.js';
+
+await init();
+const bytes = new Uint8Array(await (await fetch('./kufic.ntf')).arrayBuffer());
+const font = new NtfFont(bytes);
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const textEl = document.getElementById('text');
+const elongEl = document.getElementById('elong');
+const evEl = document.getElementById('ev');
+const gridEl = document.getElementById('grid');
+
+document.getElementById('meta').textContent =
+  `font file: ${bytes.length.toLocaleString()} bytes = ${font.n_params().toLocaleString()} ` +
+  `model weights · engine: rust→wasm (kurbo) · each keystroke re-runs the model per glyph ` +
+  `(letter, joining form, elongation) → occupancy grid → traced bezier outline`;
+
+for (const s of ['بسم الله الرحمن الرحيم', 'قلم', 'نستعليق', 'الخط الكوفي', 'محمد', 'سلام']) {
+  const b = document.createElement('button');
+  b.textContent = s;
+  b.onclick = () => { textEl.value = s; render(); };
+  document.getElementById('samples').appendChild(b);
+}
+
+function render() {
+  const elong = parseFloat(elongEl.value);
+  evEl.textContent = elong.toFixed(1);
+  const line = JSON.parse(font.shape(textEl.value, elong));
+
+  const cssW = document.getElementById('stage').clientWidth;
+  const cssH = Math.round(cssW * 0.34);
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = cssW * dpr; canvas.height = cssH * dpr;
+  canvas.style.height = cssH + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  // Fit the line into the stage, right-aligned.
+  const pad = 24;
+  // Snap cell size and origin to whole device pixels so abutting
+  // glyph fills don't leave antialiasing seams.
+  let cell = Math.min((cssW - 2 * pad) / Math.max(line.width, 1),
+                      (cssH - 2 * pad) / line.grid_h);
+  cell = Math.max(2, Math.floor(cell * dpr)) / dpr;
+  const ox = Math.round((cssW - pad - line.width * cell) * dpr) / dpr;
+  const oy = Math.round(((cssH - line.grid_h * cell) / 2) * dpr) / dpr;
+
+  if (gridEl.checked) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= Math.ceil(line.width); x++) {
+      ctx.moveTo(ox + x * cell, oy); ctx.lineTo(ox + x * cell, oy + line.grid_h * cell);
+    }
+    for (let y = 0; y <= line.grid_h; y++) {
+      ctx.moveTo(ox, oy + y * cell); ctx.lineTo(ox + line.width * cell, oy + y * cell);
+    }
+    ctx.stroke();
+    // baseline
+    ctx.strokeStyle = 'rgba(232,184,75,0.35)';
+    ctx.beginPath();
+    ctx.moveTo(ox, oy + (line.baseline + 1) * cell);
+    ctx.lineTo(ox + line.width * cell, oy + (line.baseline + 1) * cell);
+    ctx.stroke();
+  }
+
+  ctx.save();
+  ctx.translate(ox, oy);
+  ctx.scale(cell, cell);
+  ctx.fillStyle = '#e8b84b';
+  for (const g of line.glyphs) ctx.fill(new Path2D(g.path));
+  ctx.restore();
+}
+
+textEl.addEventListener('input', render);
+elongEl.addEventListener('input', render);
+gridEl.addEventListener('change', render);
+window.addEventListener('resize', render);
+render();
+</script>
+</body>
+</html>

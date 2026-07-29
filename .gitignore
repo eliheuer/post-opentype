@@ -1,0 +1,6 @@
+/target
+/demo/pkg
+*.png
+.DS_Store
+/build
+/demo/kufic.ntf

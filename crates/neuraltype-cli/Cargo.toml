@@ -1,0 +1,13 @@
+[package]
+name = "neuraltype-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ntf"
+path = "src/main.rs"
+
+[dependencies]
+neuraltype-core = { path = "../neuraltype-core" }
+kurbo.workspace = true
