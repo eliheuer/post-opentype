@@ -202,16 +202,16 @@ pub fn class_art(class: Class, form: Form) -> Option<FormArt> {
         (Ain, Medial) => art!(8, [".###.", ".#.#.", "#####"]),
 
         // Feh: small eye + shallow bowl.
-        (Feh, Isolated) => art!(8, ["#..###", "#..#.#", "######"]),
-        (Feh, Final) => art!(8, ["#..###.", "#..#.#.", "#######"]),
-        (Feh, Initial) => art!(8, [".###", ".#.#", "####"]),
-        (Feh, Medial) => art!(8, [".###.", ".#.#.", "#####"]),
+        (Feh, Isolated) => art!(6, ["....o.", "......", "#..###", "#..#.#", "######"]),
+        (Feh, Final) => art!(6, ["....o..", ".......", "#..###.", "#..#.#.", "#######"]),
+        (Feh, Initial) => art!(6, ["..o.", "....", ".###", ".#.#", "####"]),
+        (Feh, Medial) => art!(6, ["..o..", ".....", ".###.", ".#.#.", "#####"]),
 
         // Qaf: small eye + deep descender bowl.
-        (Qaf, Isolated) => art!(8, ["#..###", "#..#.#", "######", "#.....", "#####."]),
-        (Qaf, Final) => art!(8, ["#..###.", "#..#.#.", "#..####", "#......", "######."]),
-        (Qaf, Initial) => art!(8, [".###", ".#.#", "####"]),
-        (Qaf, Medial) => art!(8, [".###.", ".#.#.", "#####"]),
+        (Qaf, Isolated) => art!(6, ["....o.", "......", "#..###", "#..#.#", "######", "#.....", "#####."]),
+        (Qaf, Final) => art!(6, ["....o..", ".......", "#..###.", "#..#.#.", "#..####", "#......", "######."]),
+        (Qaf, Initial) => art!(6, ["..o.", "....", ".###", ".#.#", "####"]),
+        (Qaf, Medial) => art!(6, ["..o..", ".....", ".###.", ".#.#.", "#####"]),
 
         // Kaf: S-stroke with a tall stem.
         (Kaf, Isolated) => art!(6, ["...#", "...#", "####", "#...", "####"]),
@@ -290,12 +290,25 @@ pub fn latin_art(i: u8) -> (&'static [&'static str], Option<usize>) {
 pub fn render(class: Class, dots: Dots, form: Form, elong: usize) -> Option<GlyphImage> {
     let art = class_art(class, form)?;
     let base_w = art.rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    // Materialize the art so elongation can edit it.
+    // Materialize the art so elongation can edit it. An `o` cell is a
+    // dot anchor: it marks exactly where this form wants its i'jam
+    // dots (designer-controlled), and renders empty.
+    let mut anchor: Option<(usize, usize)> = None; // (art col, art row)
     let mut rows: Vec<Vec<bool>> = art
         .rows
         .iter()
-        .map(|r| {
-            let mut v: Vec<bool> = r.bytes().map(|b| b == b'#').collect();
+        .enumerate()
+        .map(|(dy, r)| {
+            let mut v: Vec<bool> = r
+                .bytes()
+                .enumerate()
+                .map(|(dx, b)| {
+                    if b == b'o' {
+                        anchor = Some((dx, dy));
+                    }
+                    b == b'#'
+                })
+                .collect();
             v.resize(base_w, false);
             v
         })
@@ -330,17 +343,44 @@ pub fn render(class: Class, dots: Dots, form: Form, elong: usize) -> Option<Glyp
     for e in 0..kashida {
         img.set(GRID_W - 1 - e, BASELINE_ROW);
     }
-    // Dots, placed relative to the body bounding box.
-    stamp_dots(&mut img, dots, x0, aw, art.top, art.top + rows.len() - 1);
+    // Dots: at the form's explicit anchor when it has one, else placed
+    // relative to the body bounding box.
+    let anchor_abs = anchor.map(|(dx, dy)| (x0 + dx, art.top + dy));
+    stamp_dots(&mut img, dots, x0, aw, art.top, art.top + rows.len() - 1, anchor_abs);
     img.advance = (aw + kashida) as f64;
     Some(img)
 }
 
-fn stamp_dots(img: &mut GlyphImage, dots: Dots, x0: usize, aw: usize, top: usize, bottom: usize) {
+fn stamp_dots(
+    img: &mut GlyphImage,
+    dots: Dots,
+    x0: usize,
+    aw: usize,
+    top: usize,
+    bottom: usize,
+    anchor: Option<(usize, usize)>,
+) {
     if dots == 0 {
         return;
     }
     let n = dots.unsigned_abs() as usize;
+    if let Some((ac, ar)) = anchor {
+        let cells: Vec<(usize, usize)> = match n {
+            1 => vec![(ac, ar)],
+            2 => vec![(ac.saturating_sub(1), ar), (ac + 1, ar)],
+            _ => vec![
+                (ac.saturating_sub(1), ar),
+                (ac + 1, ar),
+                (ac, if dots > 0 { ar.saturating_sub(2) } else { ar + 2 }),
+            ],
+        };
+        for (x, y) in cells {
+            if y < GRID_H && x < GRID_W && clear_around(img, x, y) {
+                img.set(x, y);
+            }
+        }
+        return;
+    }
     let c = (x0 + x0 + aw - 1) / 2; // body center column
     let row = if dots > 0 {
         if top < 2 {
