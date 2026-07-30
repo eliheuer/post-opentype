@@ -177,6 +177,7 @@ pub struct NeuralFont {
 
 impl GlyphSource for NeuralFont {
     fn glyph(&self, c: char, form: Form, elong: f64) -> Option<GlyphImage> {
+        let c = crate::art::canonical_char(c);
         let idx = self.alphabet.iter().position(|&a| a == c)?;
         let y = self.mlp.forward(&encode_input(idx, form, elong));
         Some(decode_output(&y))

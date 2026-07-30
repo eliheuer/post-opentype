@@ -153,6 +153,10 @@ pub fn shaped_forms(text: &str, dir: Dir) -> (Vec<(Vec<usize>, char, Option<Form
 /// `elong` in [0, MAX_ELONG] is the kashida elongation applied at
 /// every connection — a continuous input to the generative font.
 pub fn layout(source: &dyn GlyphSource, text: &str, elong: f64, dir: Dir) -> Line {
+    // Kashida in a grid style is a whole number of cells; the model is
+    // trained at integer levels, so snap. (Truly continuous elongation
+    // arrives with the bezier output head — see docs/SPEC.md.)
+    let elong = elong.round();
     let (shaped, rtl) = shaped_forms(text, dir);
     // Pass 1: generate every glyph and record pen positions (the pen
     // moves leftward from 0; advances are whole cells). Every source

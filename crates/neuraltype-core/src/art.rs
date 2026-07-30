@@ -100,6 +100,20 @@ pub fn letter_of_char(c: char) -> Option<(Class, Dots)> {
     })
 }
 
+/// Canonical alphabet codepoint for a supported character: hamza
+/// carriers and presentation forms fold onto the base letter the
+/// model was trained on.
+pub fn canonical_char(c: char) -> char {
+    match c {
+        'أ' | 'إ' | 'آ' => 'ا',
+        'ؤ' => 'و',
+        'ئ' => 'ي',
+        'ﻼ' => 'ﻻ',
+        'a'..='z' => c.to_ascii_uppercase(),
+        _ => c,
+    }
+}
+
 /// Letters that never connect to the following (left) letter.
 pub fn joins_left(class: Class) -> bool {
     !matches!(
