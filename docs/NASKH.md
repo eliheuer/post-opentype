@@ -156,6 +156,18 @@ claim of the project.
 
 ## 7. Staging
 
+- **Stage 0: naskh distilled (the next demo and blog post).** Convert
+  an existing OFL naskh font (Amiri) to .ntf: shape an all-pairs
+  corpus with rustybuzz, render per-glyph fields, train the field
+  head, composite and trace in the engine, publish under a new OFL
+  name. This is not the goal (section 8 records why reproduction
+  proves nothing about the tradition); it is the pipeline rehearsal.
+  Every component it forces into existence, the extraction tooling,
+  the continuous field head, the field compositing, the img2bez
+  tracing stage, the tolerance metrics, is exactly the component the
+  manuscript work needs, exercised on data that is free. Plan in
+  [docs/DISTILL.md](DISTILL.md). Working title for the write-up:
+  "Naskh Distilled: converting TTFs to NTFs."
 - **Stage 1: one hand, linear text.** Train the word-field model on a
   small transcribed corpus from one manuscript hand. Demo: type,
   select, copy, paste manuscript-quality nastaliq words in the
@@ -186,12 +198,12 @@ Kept as a record, because both were serious candidates.
   ground. The pen survives as a data prior and as editor guides only.
   This also deletes the variable-width stroke-expansion engineering
   the first revision spent its risk budget on.
-- **Distilling an existing OpenType naskh or nastaliq font.**
-  Rejected as a goal: existing digital nastaliq is the compromise the
-  project exists to escape, and a demo that reproduces it proves
-  nothing. Retained only as a possible private ablation baseline
-  (measuring how much contextual variance a small network holds), and
-  possibly not even that.
+- **Distilling an existing OpenType naskh or nastaliq font, as the
+  goal.** Rejected as a goal, adopted as a rehearsal (stage 0 above):
+  existing digital nastaliq is the compromise the project exists to
+  escape, and reproducing it proves nothing about the tradition. What
+  it does prove is the pipeline, on free data, before the manuscript
+  corpus exists.
 
 ## 9. Open problems, stated plainly
 
