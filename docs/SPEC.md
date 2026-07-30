@@ -93,7 +93,8 @@ fall out of the drawing.
    rules; right-joiners د ذ ر ز و ا have no initial/medial forms), with
    mandatory لا ligature substitution — the pair becomes one glyph whose
    advance is split across both source characters in the cluster map.
-2. *Generate*: one forward pass per glyph → occupancy grid + advance.
+2. *Generate*: one forward pass per glyph → occupancy grid; the
+   advance width derives from the grid.
 3. *Trace*: exposed cell edges, oriented filled-side-left, chained
    into closed loops → rectilinear `kurbo::BezPath` (outer contours
    and holes get opposite windings; nonzero fill).

@@ -29,10 +29,11 @@ concept legible):
   - a procedural **teacher**: square-Kufic letterforms authored as
     ASCII-art grids, composed with joining behaviour, i'jam dots, and
     continuous kashida elongation;
-  - a **neural font**: a ~55k-parameter MLP mapping
-    *(letter, joining form, elongation) → occupancy grid + advance*;
+  - a **neural font**: a 53,600-parameter MLP mapping
+    *(letter, joining form, elongation) → occupancy grid*; the advance
+    width derives from the generated grid;
   - Arabic **shaping** (joining-form analysis) and RTL layout;
-  - a **tracer** that converts generated grids into bezier outlines.
+  - a **tracer** that converts generated grids into vector outlines.
 - `crates/neuraltype-cli` — `ntf train` distills the teacher into a
   `.ntf` font file (weights only, ~200 KB f32); `ntf sheet` /
   `ntf render` produce SVG proofs comparing teacher and model.
@@ -47,9 +48,9 @@ cp build/kufic.ntf demo/
 python3 -m http.server -d demo 8123   # open http://localhost:8123
 ```
 
-Current fidelity: 430/430 (letter, form, elongation) contexts —
-Arabic and Latin capitals — reproduced exactly by the model, grid
-cells and advance widths both.
+Current fidelity: 437/437 (letter, form, elongation) contexts —
+Arabic including the لا ligature and hamza, plus Latin capitals —
+reproduced exactly by the model.
 
 ## Where this goes
 
