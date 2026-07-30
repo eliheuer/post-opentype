@@ -177,8 +177,8 @@ pub struct NeuralFont {
 }
 
 impl GlyphSource for NeuralFont {
-    /// Generate the glyph for one character in context: a single
-    /// forward pass through the network.
+    /// Generate the glyph for one character in context.
+    /// A single forward pass through the network.
     fn glyph(&self, ch: char, form: Form, elongation: f64) -> Option<GlyphImage> {
         let ch = canonical_char(ch);
         let letter = self.alphabet.iter().position(|&a| a == ch)?;
