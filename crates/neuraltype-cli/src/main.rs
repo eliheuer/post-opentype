@@ -63,7 +63,18 @@ fn dataset() -> Vec<(Vec<f32>, Vec<f32>)> {
 }
 
 fn train(out_path: &str) {
-    let data = dataset();
+    let mut data = dataset();
+    // Oversample yeh: its isolated/final below-dots occupy grid rows no
+    // other letter touches, and plain MSE underweights them.
+    let yeh_idx = ALPHABET.iter().position(|&c| c == 'ي').unwrap();
+    let extra: Vec<_> = data
+        .iter()
+        .filter(|(x, _)| x[yeh_idx] == 1.0)
+        .cloned()
+        .collect();
+    for _ in 0..3 {
+        data.extend(extra.iter().cloned());
+    }
     println!("dataset: {} samples", data.len());
     let mut mlp = Mlp::new_font(42);
     println!("model: {} params (~{} KB as f32)", mlp.n_params(), mlp.n_params() * 4 / 1024);
@@ -76,7 +87,7 @@ fn train(out_path: &str) {
         .map(|l| (vec![0.0; l.w.len()], vec![0.0; l.b.len()]))
         .collect();
     let mut v = m.clone();
-    let epochs = 16000;
+    let epochs = 26000;
     for epoch in 1..=epochs {
         let mut grads: Vec<(Vec<f32>, Vec<f32>)> = mlp
             .layers
@@ -92,7 +103,7 @@ fn train(out_path: &str) {
         let t = epoch as i32;
         let (c1, c2) = (1.0 - b1.powi(t), 1.0 - b2.powi(t));
         // Step-decayed learning rate: coarse fit, then settle exactly.
-        let lr: f32 = if epoch <= 6000 { 3e-3 } else if epoch <= 11000 { 1e-3 } else { 3e-4 };
+        let lr: f32 = if epoch <= 6000 { 3e-3 } else if epoch <= 12000 { 1e-3 } else if epoch <= 20000 { 3e-4 } else { 1e-4 };
         for (li, l) in mlp.layers.iter_mut().enumerate() {
             let (gw, gb) = &grads[li];
             let (mw, mb) = &mut m[li];

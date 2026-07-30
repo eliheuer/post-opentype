@@ -244,13 +244,15 @@ pub fn class_art(class: Class, form: Form) -> Option<FormArt> {
         // Yeh: tooth when joined; sweeping under-tail standalone.
         (Yeh, Isolated) => art!(10, [
             "..###",
-            "..#..",
-            "###..",
+            "####.",
+            ".....",
+            ".o...",
         ]),
         (Yeh, Final) => art!(10, [
             "...###",
-            "...#..",
             "####..",
+            "......",
+            ".o....",
         ]),
         (Yeh, Initial) => art!(8, [
             "..#",
@@ -579,11 +581,15 @@ pub fn class_art(class: Class, form: Form) -> Option<FormArt> {
             ".###",
             ".#.#",
             "####",
+            ".#.#",
+            ".###",
         ]),
         (Heh, Medial) => art!(8, [
             ".###.",
             ".#.#.",
             "#####",
+            ".#.#.",
+            ".###.",
         ]),
 
         // Waw: eye + reh-like under-tail.

@@ -13,6 +13,22 @@ fn main() {
     let w = line.width.round() as usize;
     println!("w={w} h={}", neuraltype_core::GRID_H);
     for s in &line.spans { println!("span i={} x={} w={}", s.index, s.x, s.width); }
+    // outline loops as corner-point lists (for design assets)
+    let mut loop_pts: Vec<(f64, f64)> = Vec::new();
+    for el in line.path.elements() {
+        match el {
+            kurbo::PathEl::MoveTo(p) => {
+                loop_pts = vec![(p.x, p.y)];
+            }
+            kurbo::PathEl::LineTo(p) => loop_pts.push((p.x, p.y)),
+            kurbo::PathEl::ClosePath => {
+                let s: Vec<String> =
+                    loop_pts.iter().map(|(x, y)| format!("({x:.0},{y:.0})")).collect();
+                println!("loop {}", s.join(" "));
+            }
+            _ => {}
+        }
+    }
     use kurbo::Shape;
     for y in 0..neuraltype_core::GRID_H {
         let row: String = (0..w).map(|x| {
