@@ -9,7 +9,7 @@ use kurbo::{BezPath, Shape};
 /// Anything that can generate a glyph image for a character in
 /// context: the procedural teacher, or the neural font.
 pub trait GlyphSource {
-    fn glyph(&self, c: char, form: Form, elong: f64) -> Option<GlyphImage>;
+    fn glyph(&self, ch: char, form: Form, elongation: f64) -> Option<GlyphImage>;
 }
 
 /// Cluster metadata: which character produced which horizontal span.

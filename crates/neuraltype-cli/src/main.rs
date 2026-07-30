@@ -13,9 +13,9 @@ use neuraltype_core::{font, Form, GlyphImage, MAX_ELONG};
 /// The teacher as a glyph source.
 struct Teacher;
 impl GlyphSource for Teacher {
-    fn glyph(&self, c: char, form: Form, elong: f64) -> Option<GlyphImage> {
-        let (class, dots) = art::letter_of_char(c)?;
-        art::render(class, dots, form, elong.round() as usize)
+    fn glyph(&self, ch: char, form: Form, elongation: f64) -> Option<GlyphImage> {
+        let (class, dots) = art::letter_of_char(ch)?;
+        art::render(class, dots, form, elongation.round() as usize)
     }
 }
 

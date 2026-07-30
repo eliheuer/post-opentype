@@ -2,9 +2,9 @@
 use neuraltype_core::shape::{layout, Dir, GlyphSource};
 struct T;
 impl GlyphSource for T {
-    fn glyph(&self, c: char, form: neuraltype_core::Form, e: f64) -> Option<neuraltype_core::GlyphImage> {
-        let (cl, d) = neuraltype_core::art::letter_of_char(c)?;
-        neuraltype_core::art::render(cl, d, form, e as usize)
+    fn glyph(&self, ch: char, form: neuraltype_core::Form, elongation: f64) -> Option<neuraltype_core::GlyphImage> {
+        let (class, dots) = neuraltype_core::art::letter_of_char(ch)?;
+        neuraltype_core::art::render(class, dots, form, elongation as usize)
     }
 }
 fn main() {
