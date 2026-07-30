@@ -2,7 +2,9 @@
 //!
 //! Layout: magic "NTF0" ⧺ u32 LE header length ⧺ JSON header ⧺ raw
 //! f32 LE weights. The header describes the alphabet and layer shapes;
-//! the weights are the font.
+//! the weights are the font. The header is padded with trailing spaces
+//! (legal JSON whitespace) so the weight blob starts on a 4-byte
+//! boundary and can be read in place from a memory-mapped file.
 
 use crate::model::{Layer, Mlp, NeuralFont};
 use serde::{Deserialize, Serialize};
@@ -15,7 +17,7 @@ pub struct Header {
     pub script: String,
     pub style: String,
     pub alphabet: String,
-    /// Layer sizes, e.g. [35, 128, 128, 225].
+    /// Layer sizes, e.g. [63, 128, 128, 224].
     pub layers: Vec<usize>,
 }
 
@@ -29,7 +31,12 @@ pub fn save(font: &NeuralFont, style: &str) -> Vec<u8> {
         alphabet: font.alphabet.iter().collect(),
         layers: sizes,
     };
-    let hjson = serde_json::to_vec(&header).unwrap();
+    let mut hjson = serde_json::to_vec(&header).unwrap();
+    // Pad so the weight blob starts 4-byte aligned (trailing spaces
+    // are legal JSON whitespace).
+    while (8 + hjson.len()) % 4 != 0 {
+        hjson.push(b' ');
+    }
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&(hjson.len() as u32).to_le_bytes());

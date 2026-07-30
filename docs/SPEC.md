@@ -44,10 +44,13 @@ Consequences worth naming:
 offset  size    content
 0       4       magic "NTF0"
 4       4       u32 LE: header length H
-8       H       JSON header
+8       H       JSON header, space-padded so 8+H is a multiple of 4
 8+H     ...     raw little-endian f32 weights, layer by layer
                 (each layer: W row-major [n_out × n_in], then b)
 ```
+
+The header padding keeps the weight blob 4-byte aligned, so a renderer
+can map the file into memory and read the weights in place.
 
 JSON header fields:
 
