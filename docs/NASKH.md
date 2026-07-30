@@ -1,322 +1,215 @@
-# v1 Research: Naskh and Nastaliq
+# v1 Research: Manuscript Nastaliq on the Web
 
-**Status: research, not implemented.** This document works out how to
-build the naskh demo, and after it the nastaliq demo. It is meant to be
-argued with.
+**Status: research, revision 2.** The first revision of this document
+proposed distilling an existing OpenType naskh font and building a
+skeleton-plus-pen output head. Both were rejected on review; the
+record of why is in section 8. This revision starts from the actual
+goal.
 
-## 1. What v0 proved, and what it dodged
+## 1. The goal
 
-Square Kufic collapsed every hard problem into an easy one:
+Not to reproduce existing nastaliq fonts. Existing digital nastaliq is
+already a compromise: the script forced into the emulated metal-type
+sorts of OpenType. Reproducing it with a neural network would
+demonstrate nothing.
 
-| Problem | v0 answer | Why it was easy |
-| --- | --- | --- |
-| Shape representation | 16×14 binary occupancy grid | fixed size, binary, advance derivable |
-| Training data | 437 hand-authored ASCII grids | enumerable by one person in one file |
-| Quality metric | cell-exact reproduction | no such thing as "almost right" |
-| Letter joining | merge bitmaps on one baseline row | compositing does the work |
+The goal is the first digital fonts that do the nastaliq tradition
+justice: manuscript-quality words on the web that are still real text.
+Selectable, clickable, copyable, pastable, exactly as the v0 demo
+already does for square Kufic. And beyond OpenType's reach: words that
+can be moved, scaled, and refit, with the letterforms regenerating to
+suit their context instead of being squeezed or stretched as frozen
+outlines.
 
-Naskh reopens all four. The letterforms are smooth curves with a
-modulated stroke. The contextual variation is larger than four forms.
-"Exact" stops being the metric because the outputs are continuous. And
-the joins are curved transitions in a joining zone, not a shared row of
-cells. Nastaliq adds a fifth problem: letters stack down a diagonal
-cascade whose geometry depends on the whole word.
+The reference standard is the manuscript tradition itself: muraqqa and
+qit'a panels where words nest, stack, and fill their frame, and where
+the quality lives in the balance of black and white.
 
-The rest of this document takes the four problems in order of how much
-they constrain everything else: representation, data, joining, quality.
+## 2. Design principle: notan
 
-## 2. Output representation
+Good typography is figure and ground, black and white, notan. The
+tradition's quality judgment operates on the masses, not on an
+imagined centerline. This is the representation criterion for the
+whole project:
 
-Four candidates.
+**The model must learn and output in the shape domain, where figure
+and ground are symmetric. Not in the stroke domain.**
 
-### a. Signed-distance field (the continuous version of v0)
+The practical consequence is that the field representation from v0 is
+the right lineage, not a stepping stone. A signed-distance field is
+notan as data: the sign is figure versus ground, the zero contour is
+the boundary, and nothing about it assumes the shape came from a pen.
+v0's binary occupancy grid was the coarsest possible notan
+representation; v1 refines it instead of replacing it.
 
-The model outputs a grayscale distance field on a finer grid (64×56 or
-96×84 instead of 16×14 binary). The engine composites fields per line
-(pointwise max), takes the zero iso-contour, and fits curves to it.
+The pen is not discarded; it is demoted to what it really is: a prior.
+The reed pen explains why the masses look the way they do, and that
+knowledge is useful for data augmentation and for editor guides. It is
+never the output representation, because the finished manuscript
+letterform is not a pen sweep; it is a judged and corrected shape.
 
-- Pro: it is v0's pipeline with one type changed. Compositing still
-  solves joining. Every piece of the current engine survives.
-- Pro: the tracing stage is a solved problem in this ecosystem:
-  [img2bez](https://github.com/eliheuer/img2bez) exists precisely to
-  turn a raster into a font-quality bézier outline with points at
-  extrema and corners. Feed it the composited line, supersampled.
-- Pro: training data is nearly free (section 3).
-- Con: resolution-limited. Hairline details need field resolution.
-- Con: the outline point structure is procedural (img2bez's), not
-  learned. For a demo this is fine; it is img2bez's whole thesis.
+## 3. The unit of generation: the word
 
-### b. Skeleton + pen (the Metafont lineage)
+v0 generates per glyph and composites on a shared baseline row.
+Nastaliq words do not decompose that way; a word is one cascading
+gesture whose geometry depends on everything in it. So the natural
+unit of generation is the **word**:
 
-The model outputs a centerline: a short sequence of on-curve points
-with tangent handles and a pen width (and possibly pen angle) per
-point. The engine expands the stroke into a filled outline.
+```
+word_shape = f(letters of the word, fit parameters, style)
+```
 
-- Pro: matches what naskh is. The script is pen strokes over a
-  skeleton; Thomas Milo's analysis and the whole Metafont/AlQalam
-  lineage model it this way.
-- Pro: radically compact. A naskh letter body is 3 to 12 skeleton
-  points, roughly 100 output floats per glyph, smaller than v0's 224.
-  The model stays under ~100k parameters. This representation matches
-  the intrinsic dimensionality of the script.
-- Pro: joining becomes geometry (section 4): weld skeleton endpoints.
-- Pro: this is the representation the editor (in-context skeleton
-  drawing, corrections as training data) wants.
-- Con: variable-width stroke expansion is real engineering. kurbo has
-  constant-width stroking and cubic offset curves; variable width means
-  offsetting with a varying distance and fitting. Prior art:
-  Kalliculator, FontForge's Expand Stroke, RoboFont outliner, and Raph
-  Levien's parallel-curve work. Tractable, not trivial.
-- Con: a pure pen model does not capture everything. Naskh terminals
-  (tapered tails, head serifs, the eyes of م و ف) need pen-angle
-  changes or explicit terminal geometry. Metafont handled this with
-  elaborate pen machinery; we would start simpler and accept a plainer
-  naskh.
-- Con: training data requires skeletons, which nobody publishes
-  (section 3).
+This dissolves the hardest v0-style problem. Intra-word joining stops
+being an engineering contract (ports, welds, shared cells) and becomes
+part of the learned shape, which is what it is in the manuscripts.
 
-### c. Direct outline points
+What word-level generation must not break is the text machinery, and
+this needs one new idea. In v0 the engine reports per-character spans
+for cursor, selection, and clipboard. A generated word-shape needs the
+2D equivalent: alongside the shape field, the model outputs a **letter
+map**, a soft segmentation channel that assigns regions of the word to
+logical letter indices. Cursor placement, hit testing, and selection
+highlighting read the letter map; the hidden-input architecture from
+v0 carries over unchanged. Copy and paste never see shapes at all.
 
-The model outputs the final outline as a fixed-maximum sequence of
-cubic segments with validity flags (the DeepVecFont-style head).
+Word boundaries remain the engine's job (spaces are layout, not
+generation), so lines compose from generated words the way v0 lines
+compose from glyphs.
 
-- Pro: captures any shape, including terminals, exactly.
-- Con: highest dimensionality; self-intersection and winding errors
-  are possible outputs; and joining is brittle, because two separately
-  predicted outlines must fuse along a shared boundary. v0 fused
-  shapes by compositing before tracing; direct outlines would need
-  robust curve booleans, which the Rust ecosystem does not really
-  have. Not recommended for v1.
+## 4. Representation
 
-### d. Hybrid: skeleton for structure, learned residual for finish
+- **Output: a field.** Signed-distance (or occupancy at higher
+  resolution) on a normalized canvas per word, plus the letter map
+  channel, plus anchor metadata (baseline entry and exit, so layout
+  can place the word). Resolution is an experiment: 128 to 256 pixels
+  of em height is the plausible range for manuscript detail.
+- **Vector output stays.** The composited field is traced to bézier
+  outlines at render time. This is img2bez's problem statement
+  verbatim: raster in, font-quality outline out, deterministic, in
+  milliseconds. The tracing stage is the one part of this project that
+  is already built.
+- **Conditioning.** Letter sequence of the word (variable length, so
+  the head grows past a flat MLP: a small sequence encoder feeding the
+  field decoder), fit parameters (width target, the generalization of
+  v0's elongation), and eventually style axes.
+- **Determinism holds.** No sampling. Same word, same parameters, same
+  field, everywhere. The v0 claim survives intact.
 
-Predict the skeleton, expand the stroke, then apply a small learned
-displacement to the expanded outline for terminals and optical
-corrections. Probably the eventual answer (it is the img2bez
-philosophy: procedural 90%, learned 9%, human 1%), but it depends on
-(b) existing first.
+Honest size estimate: this is no longer a 53k-parameter MLP. A
+text-conditioned field decoder for one style is plausibly one to ten
+million parameters, a few megabytes quantized. Chunky for a webfont,
+viable for a demo, and the number is itself a research result: how
+small can a hand be?
 
-### Recommendation
+## 5. Data: manuscripts first
 
-Two stages.
+The first revision deferred manuscripts as too hard. Reviewing the
+goal, they are not optional: the manuscript tradition is the standard,
+so it must be the data.
 
-- **v0.5, the next demo: representation (a).** SDF plus img2bez
-  tracing. Shortest path to naskh on screen, reuses the existing
-  engine and the existing tracer, and the training data is free.
-- **v1, the format-defining version: representation (b).** Skeleton +
-  pen, hand-authored and editor-refined exemplars. The v0.5 model
-  becomes the reference to proof against.
+1. **Corpus.** Digitized nastaliq manuscripts and panels. Museum and
+   library collections (public-domain digitizations) plus the
+   designer's own collection of reference scans. Start embarrassingly
+   small: a few panels is a few hundred words.
+2. **Segmentation.** Binarize ink from ground, segment words. The
+   panels are high-contrast by design; classical vision goes far
+   before any learning is needed.
+3. **Transcription.** Each word labeled with its letter sequence. At
+   corpus sizes of hundreds to low thousands of words this is
+   designer-scale labor, not crowd-scale.
+4. **Normalization.** Scale to a common em, orient to the cascade,
+   compute fields. Letter maps for training come from coarse manual
+   segmentation on a subset plus propagation, and improve through the
+   editor loop.
+5. **Augmentation.** The pen prior earns its keep here: synthetic
+   variations (slight rotations, width modulation consistent with a
+   nib) multiply a small corpus without leaving the style.
 
-## 3. Training data
+The second data stream is the editor (section 6): every correction
+and every newly drawn exemplar is a labeled training sample. The
+corpus is not collected once; it accumulates as a byproduct of design
+work. Grid-disciplined, machine-legible sources as the design medium
+is the Virtua Grotesk thesis, applied to a millennium-old style.
 
-Three sources, in increasing order of ambition.
+## 6. The editor: masses, not points
 
-### a. Distill an existing OpenType naskh font
+No existing font editor can author this format, which is the point.
+The editor for a notan-domain font edits masses:
 
-Shape a corpus with [rustybuzz](https://github.com/harfbuzz/rustybuzz)
-(a complete pure-Rust HarfBuzz port, shaping-identical in practice),
-render each glyph-in-context with ttf-parser outlines, and train on
-(context → shape) pairs. The font's GSUB/GPOS machinery already
-encodes the contextual rules; we would be distilling the best of
-OpenType into a neural font, then generalizing past it.
+- The canvas is the field itself. Corrections are painted and carved
+  (figure and ground are both first-class), not dragged point by
+  point. The vector outline is a live traced preview, never the
+  source.
+- Editing happens in context: type a word, the model draws it, the
+  designer corrects the word, and the correction is stored with its
+  full conditioning as a training sample.
+- Active learning as proofing: the editor surfaces the words the model
+  is least certain of, ranked, the way the img2bez eval harness ranks
+  worst-first.
+- Train is the compile step, minutes not hours, with proof sheets
+  against the exemplar corpus.
 
-- Source fonts, all OFL: [Amiri](https://github.com/aliftype/amiri)
-  (Bulaq-press naskh, the richest contextual behavior), Scheherazade
-  New (SIL, systematic and simpler), Noto Naskh Arabic.
-- Corpus: a synthetic all-pairs wordlist (every letter before and
-  after every letter) plus real text. A few thousand contexts.
-- Licensing: a model trained to reproduce an OFL font is a derivative
-  work. Release under OFL with a new name (Reserved Font Name rules
-  apply: it cannot be called Amiri). Acceptable for research; state it
-  plainly.
-- This is days of engineering, not weeks, and it answers the central
-  question early: **can a small network hold naskh at all, and at what
-  parameter count?**
+Runebender-web is the natural host (canvas, text plumbing, live
+reload already exist), with the mass-editing surface as the new part.
+This editor does not exist anywhere; building it is the frontier
+claim of the project.
 
-### b. Hand-authored skeletons on the nuqta grid
+## 7. Staging
 
-The v0 approach, upgraded from ASCII art to drawn centerlines. The
-classical pedagogy is already a grid system: Ibn Muqla's proportioned
-script (al-khatt al-mansub, 10th century) measures every letter in
-rhombic dots of the pen (nuqat); alif is so many dots tall, the bowls
-so many dots wide. A nuqta-quantized skeleton set is the traditional
-analog of Virtua Grotesk's dyadic grid, and the same argument applies:
-grid-disciplined sources are machine-legible training data.
+- **Stage 1: one hand, linear text.** Train the word-field model on a
+  small transcribed corpus from one manuscript hand. Demo: type,
+  select, copy, paste manuscript-quality nastaliq words in the
+  existing island, with a fit slider showing regeneration under
+  pressure. This alone is past what OpenType can do, and past what
+  the distillation plan would have shown.
+- **Stage 2: the editor loop.** Mass-domain correction in
+  Runebender-web; the corpus grows; quality climbs measurably
+  (held-out field error, traced-outline structure checks, reading
+  proofs against the source panels).
+- **Stage 3: composition.** Panel layout in the manuscript manner:
+  words placed, scaled, and refit under a layout optimizer that can
+  re-generate any word at any fit. Collisions become a soft cost in
+  the optimizer rather than an unsolved font-engineering problem.
 
-- Authoring tool: Runebender-web already draws béziers; skeletons are
-  open contours plus a width per point (storable in UFO lib data or a
-  second layer). This is the beginning of the editor described in the
-  blog post, where corrections in context become training samples.
-- Effort: roughly 100 to 300 exemplars for a credible naskh subset,
-  drawn by a person who can draw naskh. Slower than (a), but every
-  sample is a design decision rather than an inherited one.
+Naskh remains available as a lower-risk rehearsal of the same
+pipeline (calmer cascade, simpler composition), but the target that
+justifies the work is nastaliq.
 
-### c. Manuscript scans
+## 8. Considered and rejected
 
-The stated goal (the best naskh and nastaliq manuscripts on the web)
-and a research project in itself: segmentation, skeleton extraction
-from ink, normalization across hands. img2bez points in this
-direction (it exists to trace rasters), but this is v2+ data. Not for
-the next demo.
+Kept as a record, because both were serious candidates.
 
-### Recommendation
+- **Skeleton + pen output head.** Rejected as a representation:
+  stroke expansion privileges the centerline and makes the white
+  space a residual, and the finished manuscript letterform is a
+  corrected shape, not a pen sweep. Good design thinks in figure and
+  ground. The pen survives as a data prior and as editor guides only.
+  This also deletes the variable-width stroke-expansion engineering
+  the first revision spent its risk budget on.
+- **Distilling an existing OpenType naskh or nastaliq font.**
+  Rejected as a goal: existing digital nastaliq is the compromise the
+  project exists to escape, and a demo that reproduces it proves
+  nothing. Retained only as a possible private ablation baseline
+  (measuring how much contextual variance a small network holds), and
+  possibly not even that.
 
-(a) for v0.5, immediately. (b) begins in parallel as the editor work
-matures, because v1's skeleton head needs it. (c) stays on the
-horizon.
+## 9. Open problems, stated plainly
 
-## 4. Joining, and the nastaliq cascade
-
-The deep problem. Two mechanisms, one per representation.
-
-### Compositing (for the SDF path)
-
-OpenType naskh fonts already join the way v0 joins: each glyph's
-baseline stroke ends in a flat edge at the advance boundary, and
-adjacent glyphs abut. So per-glyph fields rendered from a shaped font
-carry the same convention, and pointwise-max compositing fuses them
-exactly as v0's bitmaps fused. Nothing new is needed for v0.5.
-
-### Pen-state threading (for the skeleton path, and for nastaliq)
-
-Generation flows through the word the way a calligrapher writes it.
-Each glyph model takes (letter, neighbors, elongation, **incoming pen
-state**) and produces (skeleton, **outgoing pen state**), where pen
-state is position, tangent, and width at the connection. The engine
-threads the state from glyph to glyph; joins are continuous by
-construction, the way v0 made merging an invariant rather than a hope.
-
-This also is the nastaliq answer. The cascade (each letter starting
-lower than the last, the word sloping down to the baseline) is exactly
-a pen state whose vertical component accumulates. Layout measures the
-word's total descent in a first pass and starts the word high so it
-lands on the baseline, which is how nastaliq actually behaves. For
-nastaliq data, Gulzar
-([googlefonts/Gulzar](https://github.com/googlefonts/Gulzar), OFL,
-pure OpenType) and Noto Nastaliq Urdu both encode entry/exit anchors
-as cursive attachment; rustybuzz reports the resulting offsets, so the
-cascade geometry is extractable per glyph pair.
-
-Nastaliq collisions (dots and bowls striking the next word's stack)
-are the hardest known problem in this script; SIL's Awami Nastaliq
-documentation is the honest reference. The demo answer is to ignore
-collisions and say so.
-
-## 5. Conditioning and architecture
-
-v0 conditions on (letter, joining form, elongation): 63 inputs. Naskh
-needs the neighbors, because the whole point is context beyond four
-forms:
-
-- letter id, joining form, elongation (as today)
-- previous letter id and next letter id, as small learned embeddings
-  (8 to 16 dimensions each) rather than one-hots
-- later: position in word, style axes
-
-Measured, not guessed: shape an all-pairs corpus through Amiri and
-count distinct outlines per (letter, form). That number tells us how
-much contextual variance the model must hold and becomes the v0.5
-fidelity denominator, the naskh equivalent of 437/437.
-
-Size budgets:
-
-| Head | Output | Params (est.) | .ntf size |
-| --- | --- | --- | --- |
-| SDF 64×56 (dense) | 3,584 floats | ~1M | ~4 MB f32, ~1 MB int8 |
-| SDF 64×56 (small deconv) | 3,584 floats | 100k to 300k | 0.4 to 1.2 MB |
-| Skeleton + pen | ~100 floats | 50k to 120k | 200 to 500 KB |
-
-The SDF head is demo-acceptable and webfont-marginal; the skeleton
-head returns to real webfont budgets. Both stay trivially realtime on
-CPU (a forward pass is on the order of a million multiply-adds).
-Quantization (f16/int8 fields in the header) becomes worth doing at
-v0.5 sizes.
-
-## 6. Quality: what replaces 437/437
-
-Continuous outputs need layered metrics:
-
-1. **Field/geometry error** against held-out contexts: IoU of the
-   thresholded field, or mean point error in font units for skeletons.
-2. **Structural checks** on the traced outline, borrowed from
-   img2bez's judge: points at extrema, no self-intersections, handle
-   geometry sane, point-count parsimony.
-3. **Proof sheets**, teacher vs model, per context, ranked worst
-   first, exactly like the v0 sheets and the img2bez eval harness.
-   Agents can grind this loop; a person judges the top of the ranking.
-4. **Reading test**: running text at reading sizes next to the source
-   font. The demo claim should be "indistinguishable at reading
-   sizes," which is checkable by eye and honest about zoom.
-
-## 7. The concrete plan
-
-### v0.5: naskh distilled (the next demo)
-
-1. **Extraction**: rustybuzz + ttf-parser over Amiri. Shape an
-   all-pairs corpus plus real text; for every glyph-in-context record
-   (letter, form, prev, next, outline, advance). Dedupe outlines to
-   measure the true context count.
-2. **Fields**: render each glyph outline to a 64×56 (try 96×84) SDF
-   with kurbo/tiny-skia plus a distance transform, normalized to the
-   same right-aligned canvas convention as v0.
-3. **Model**: inputs from section 5, small deconv or dense head,
-   trained with the existing hand-rolled trainer (add minibatching if
-   full batch stops fitting).
-4. **Engine**: GlyphImage grows a continuous variant; compositing
-   becomes pointwise max; tracing goes through img2bez (or, first
-   pass, marching squares + kurbo curve fit, then compare).
-5. **Metrics**: section 6; the fidelity line becomes "N of M contexts
-   within tolerance, worst context shown."
-6. **Demo**: the same island with a font picker; the .ntf header
-   already carries format/style, and this is the moment to add grid
-   dimensions to the header so the two fonts can differ.
-7. **License**: publish the distilled font as OFL with a new name.
-
-### v1: skeleton + pen
-
-1. Variable-width stroke expansion in kurbo (offset curves with
-   varying distance; evaluate against Kalliculator-style output).
-2. Pen-state threading in the engine, ports as a format contract.
-3. Skeleton authoring in Runebender-web (open contours + widths in
-   UFO); `ntf import` for UFO exemplars.
-4. Author the first 50 naskh skeletons on a nuqta grid; train the
-   skeleton head; proof against the v0.5 SDF model.
-5. The editor loop from the blog post starts here: correct a letter
-   in context, retrain, diff.
-
-### v2: nastaliq
-
-Pen-state threading plus cascade layout; data from Gulzar or Noto
-Nastaliq Urdu cursive attachments; collisions acknowledged, not
-solved.
-
-## 8. Open problems, stated plainly
-
-- **SDF resolution vs naskh detail.** 64px em may blur thin joins;
-  96px triples the output size. Needs one experiment, early.
-- **Trace cost per keystroke.** img2bez is milliseconds on big
-  rasters; a composited line field is small. Likely fine, unmeasured.
-- **Skeleton extraction from outlines** (if we ever want skeletons
-  from Amiri rather than by hand): medial-axis computation is noisy
-  exactly where it matters, at joins and terminals. This is why v1
-  plans hand-authored skeletons instead.
-- **How small can naskh get?** The central open question. If a
-  50k-parameter skeleton model can hold Ottoman-quality naskh, the
-  thesis of the whole project holds. If it takes 5M parameters, the
-  format is still interesting but the story changes.
-- **Terminal quality.** Pen models flatten terminals; hybrid residual
-  (2d) is the planned answer, unproven here.
-- **Cursor and clusters** carry over unchanged; the span machinery
-  already handles ligatures, and nastaliq's cascade does not change
-  the logical model.
-
-## 9. Additions to the reading list
-
-Beyond docs/RESEARCH.md: Ibn Muqla's proportional system (the nuqta
-grid, via Sheila Blair's *Islamic Calligraphy*); Kalliculator
-(Frederik Berlaen) as the closest prior art for pen-model font
-generation; Raph Levien's parallel-curve and stroke-expansion writing
-(kurbo's offset machinery); SIL's Awami Nastaliq engineering notes on
-collision avoidance; [Gulzar](https://github.com/googlefonts/Gulzar)
-and [Amiri](https://github.com/aliftype/amiri) as the OFL sources for
-distillation.
+- **Transcription is the bottleneck.** The corpus starts at hundreds
+  of words and grows by hand. The editor loop is the only scaling
+  mechanism, and it has to be pleasant enough to use daily.
+- **Field resolution versus manuscript detail.** Hairline terminals
+  and tight counters at 128px em need measurement, early.
+- **The letter map is unproven.** Soft 2D segmentation for cursor and
+  selection inside a generated word is a new mechanism; it needs a
+  prototype before anything depends on it.
+- **Model size.** One to ten million parameters is an estimate with
+  wide error bars in both directions. The answer is a headline result
+  either way.
+- **Style coherence across words.** Per-word generation must not
+  drift: two words on one line must read as one hand. Conditioning on
+  shared style state, or a consistency loss, are candidate answers.
+- **What the demo owes the tradition.** Reproducing manuscript words
+  a model was trained near is not yet doing the tradition justice;
+  the bar is new words, unseen combinations, that a calligrapher
+  would accept. That judgment cannot be automated and should not be.
