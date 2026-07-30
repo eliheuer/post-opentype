@@ -14,7 +14,7 @@ pub const N_IN: usize = ALPHABET_LEN + 4 + 1;
 /// property of the generated shape: glyphs are right-aligned on the
 /// canvas, so the pen simply moves to the leftmost generated column.
 pub const N_OUT: usize = GRID_W * GRID_H;
-pub const ALPHABET_LEN: usize = 57;
+pub const ALPHABET_LEN: usize = 58;
 
 /// A dense layer: `out = act(W·x + b)`, weights row-major [n_out × n_in].
 #[derive(Clone)]

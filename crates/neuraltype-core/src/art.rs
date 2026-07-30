@@ -39,6 +39,8 @@ pub enum Class {
     Heh,
     Waw,
     Yeh,
+    /// Standalone hamza: a small non-joining mark on the baseline.
+    Hamza,
     /// The لا ligature: lam + alef fuse into one glyph (mandatory in
     /// Arabic). Shaping substitutes the pair; the model knows it as
     /// one letter id.
@@ -93,6 +95,7 @@ pub fn letter_of_char(c: char) -> Option<(Class, Dots)> {
         'و' | 'ؤ' => (Waw, 0),
         'ي' | 'ئ' => (Yeh, -2),
         'ى' => (Yeh, 0),
+        'ء' => (Hamza, 0),
         'ﻻ' | 'ﻼ' => (LamAlef, 0), // presentation forms, typed directly
         'A'..='Z' => (Latin(c as u8 - b'A'), 0),
         'a'..='z' => (Latin(c as u8 - b'a'), 0),
@@ -122,6 +125,7 @@ pub fn joins_left(class: Class) -> bool {
             | Class::Dal
             | Class::Reh
             | Class::Waw
+            | Class::Hamza
             | Class::LamAlef
             | Class::Latin(_)
     )
@@ -129,7 +133,7 @@ pub fn joins_left(class: Class) -> bool {
 
 /// Letters that can receive a connection from the preceding letter.
 pub fn joins_right(class: Class) -> bool {
-    !matches!(class, Class::Latin(_))
+    !matches!(class, Class::Latin(_) | Class::Hamza)
 }
 
 /// Does elongation apply to this glyph? Arabic stretches the baseline
@@ -145,7 +149,8 @@ pub fn elongatable(class: Class, form: Form) -> bool {
 /// The full inventory of supported codepoints (the model's alphabet).
 pub const ALPHABET: &[char] = &[
     'ا', 'ب', 'ت', 'ث', 'ج', 'ح', 'خ', 'د', 'ذ', 'ر', 'ز', 'س', 'ش', 'ص', 'ض', 'ط', 'ظ', 'ع',
-    'غ', 'ف', 'ق', 'ك', 'ل', 'م', 'ن', 'ه', 'ة', 'و', 'ي', 'ى', 'ﻻ', 'A', 'B', 'C', 'D', 'E', 'F',
+    'غ', 'ف', 'ق', 'ك', 'ل', 'م', 'ن', 'ه', 'ة', 'و', 'ي', 'ى', 'ء', 'ﻻ', 'A', 'B', 'C', 'D',
+    'E', 'F',
     'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
     'Y', 'Z',
 ];
@@ -265,6 +270,10 @@ pub fn class_art(class: Class, form: Form) -> Option<FormArt> {
         (Waw, Isolated) => art!(8, [".###", ".#.#", "####", "#...", "##.."]),
         (Waw, Final) => art!(8, [".###.", ".#.#.", "#####", "#....", "##..."]),
         (Waw, _) => None,
+
+        // Standalone hamza: small angular mark sitting on the baseline.
+        (Hamza, Isolated) => art!(7, [".##", "..#", ".##", "##."]),
+        (Hamza, _) => None,
 
         // Lam-alef ligature: the two stems joined at the baseline.
         (LamAlef, Isolated) => art!(2, ["#..#", "#..#", "#..#", "#..#", "#..#", "#..#", "#..#", "#..#", "####"]),

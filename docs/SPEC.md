@@ -57,7 +57,7 @@ JSON header fields:
 | `script`   | `"arabic"`                                         |
 | `style`    | e.g. `"square-kufic"`                              |
 | `alphabet` | string of supported codepoints, index = model id   |
-| `layers`   | layer sizes, e.g. `[62, 128, 128, 224]`            |
+| `layers`   | layer sizes, e.g. `[63, 128, 128, 224]`            |
 
 Hidden layers are ReLU; the output layer is linear. (Quantization to
 f16/int8 is an obvious follow-up; v0 keeps f32 for simplicity.)
@@ -69,9 +69,9 @@ coarse binary grid (strokes 1 cell wide, counters 1 cell), so the
 generative representation is trivial and every part of the pipeline is
 inspectable.
 
-**Input** (62 floats):
-- one-hot letter identity over the alphabet (57: Arabic, the لا
-  ligature, and Latin capitals) — note dots are *generated*, not
+**Input** (63 floats):
+- one-hot letter identity over the alphabet (58: Arabic including the
+  standalone hamza, the لا ligature, and Latin capitals) — note dots are *generated*, not
   input: ب/ت/ث are distinct ids whose shared rasm the model discovers
   in training;
 - one-hot joining form (4): isolated / initial / medial / final;
