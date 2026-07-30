@@ -39,6 +39,10 @@ pub enum Class {
     Heh,
     Waw,
     Yeh,
+    /// The لا ligature: lam + alef fuse into one glyph (mandatory in
+    /// Arabic). Shaping substitutes the pair; the model knows it as
+    /// one letter id.
+    LamAlef,
     /// Latin capital, 0 = A … 25 = Z. Latin letters have one form
     /// (no joining); their elongation stretches designated horizontal
     /// strokes instead of a baseline connector.
@@ -89,6 +93,7 @@ pub fn letter_of_char(c: char) -> Option<(Class, Dots)> {
         'و' | 'ؤ' => (Waw, 0),
         'ي' | 'ئ' => (Yeh, -2),
         'ى' => (Yeh, 0),
+        'ﻻ' | 'ﻼ' => (LamAlef, 0), // presentation forms, typed directly
         'A'..='Z' => (Latin(c as u8 - b'A'), 0),
         'a'..='z' => (Latin(c as u8 - b'a'), 0),
         _ => return None,
@@ -99,7 +104,12 @@ pub fn letter_of_char(c: char) -> Option<(Class, Dots)> {
 pub fn joins_left(class: Class) -> bool {
     !matches!(
         class,
-        Class::Alef | Class::Dal | Class::Reh | Class::Waw | Class::Latin(_)
+        Class::Alef
+            | Class::Dal
+            | Class::Reh
+            | Class::Waw
+            | Class::LamAlef
+            | Class::Latin(_)
     )
 }
 
@@ -121,7 +131,7 @@ pub fn elongatable(class: Class, form: Form) -> bool {
 /// The full inventory of supported codepoints (the model's alphabet).
 pub const ALPHABET: &[char] = &[
     'ا', 'ب', 'ت', 'ث', 'ج', 'ح', 'خ', 'د', 'ذ', 'ر', 'ز', 'س', 'ش', 'ص', 'ض', 'ط', 'ظ', 'ع',
-    'غ', 'ف', 'ق', 'ك', 'ل', 'م', 'ن', 'ه', 'ة', 'و', 'ي', 'ى', 'A', 'B', 'C', 'D', 'E', 'F',
+    'غ', 'ف', 'ق', 'ك', 'ل', 'م', 'ن', 'ه', 'ة', 'و', 'ي', 'ى', 'ﻻ', 'A', 'B', 'C', 'D', 'E', 'F',
     'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
     'Y', 'Z',
 ];
@@ -241,6 +251,11 @@ pub fn class_art(class: Class, form: Form) -> Option<FormArt> {
         (Waw, Isolated) => art!(8, [".###", ".#.#", "####", "#...", "##.."]),
         (Waw, Final) => art!(8, [".###.", ".#.#.", "#####", "#....", "##..."]),
         (Waw, _) => None,
+
+        // Lam-alef ligature: the two stems joined at the baseline.
+        (LamAlef, Isolated) => art!(2, ["#..#", "#..#", "#..#", "#..#", "#..#", "#..#", "#..#", "#..#", "####"]),
+        (LamAlef, Final) => art!(2, ["#..#.", "#..#.", "#..#.", "#..#.", "#..#.", "#..#.", "#..#.", "#..#.", "#####"]),
+        (LamAlef, _) => None,
 
         // Latin capitals: one form, cap height = alif height (rows 2–10).
         (Latin(i), Isolated) => Some(FormArt { top: 2, rows: latin_art(i).0 }),

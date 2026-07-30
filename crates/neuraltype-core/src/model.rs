@@ -10,11 +10,11 @@ use crate::shape::GlyphSource;
 use crate::{Form, GlyphImage, GRID_H, GRID_W, MAX_ELONG};
 
 pub const N_IN: usize = ALPHABET_LEN + 4 + 1;
-/// The advance width gets several output slots (averaged at decode)
-/// so its gradient is not drowned out by the 224 grid cells.
-pub const ADV_SLOTS: usize = 12;
-pub const N_OUT: usize = GRID_W * GRID_H + ADV_SLOTS;
-pub const ALPHABET_LEN: usize = 56;
+/// The model predicts only the occupancy grid. The advance width is a
+/// property of the generated shape: glyphs are right-aligned on the
+/// canvas, so the pen simply moves to the leftmost generated column.
+pub const N_OUT: usize = GRID_W * GRID_H;
+pub const ALPHABET_LEN: usize = 57;
 
 /// A dense layer: `out = act(W·x + b)`, weights row-major [n_out × n_in].
 #[derive(Clone)]
@@ -148,24 +148,25 @@ pub fn encode_input(letter_idx: usize, form: Form, elong: f64) -> Vec<f32> {
     x
 }
 
-/// Decode a model output vector into a glyph image.
+/// Decode a model output vector into a glyph image. The advance is
+/// derived from the grid: distance from the canvas's right edge to the
+/// leftmost occupied column.
 pub fn decode_output(y: &[f32]) -> GlyphImage {
     let mut img = GlyphImage::empty();
     for (i, v) in y[..GRID_W * GRID_H].iter().enumerate() {
         img.cells[i] = *v > 0.5;
     }
-    let adv: f32 = y[GRID_W * GRID_H..].iter().sum::<f32>() / ADV_SLOTS as f32;
-    img.advance = (adv as f64 * GRID_W as f64).round().max(1.0);
+    let leftmost = (0..GRID_W).find(|&x| (0..GRID_H).any(|y| img.get(x, y)));
+    img.advance = match leftmost {
+        Some(x) => (GRID_W - x) as f64,
+        None => 1.0,
+    };
     img
 }
 
 /// Encode a teacher glyph image as a training target.
 pub fn encode_target(img: &GlyphImage) -> Vec<f32> {
-    let mut t: Vec<f32> = img.cells.iter().map(|&c| if c { 1.0 } else { 0.0 }).collect();
-    for _ in 0..ADV_SLOTS {
-        t.push(img.advance as f32 / GRID_W as f32);
-    }
-    t
+    img.cells.iter().map(|&c| if c { 1.0 } else { 0.0 }).collect()
 }
 
 /// The neural font as a glyph source: one forward pass per glyph.

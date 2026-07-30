@@ -96,26 +96,44 @@ fn visual_order(text: &str, dir: Dir) -> (Vec<(usize, char)>, bool) {
 }
 
 /// Compute the joining form of each letter in `text`, in visual order,
-/// keeping logical indices. Non-letters (spaces, unsupported chars)
-/// and non-joining scripts break joining.
-pub fn shaped_forms(text: &str, dir: Dir) -> (Vec<(usize, char, Option<Form>)>, bool) {
+/// keeping logical indices (a glyph may carry two — the لا ligature).
+/// Non-letters (spaces, unsupported chars) and non-joining scripts
+/// break joining.
+pub fn shaped_forms(text: &str, dir: Dir) -> (Vec<(Vec<usize>, char, Option<Form>)>, bool) {
     let (chars, rtl) = visual_order(text, dir);
+    // Cluster pass: mandatory لا ligature — lam followed by alef fuses
+    // into one glyph carrying both logical indices.
+    let mut clusters: Vec<(Vec<usize>, char)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let (li, c) = chars[i];
+        let lam = matches!(letter_of_char(c), Some((Class::Lam, _)));
+        let next_alef = i + 1 < chars.len()
+            && matches!(letter_of_char(chars[i + 1].1), Some((Class::Alef, _)));
+        if lam && next_alef {
+            clusters.push((vec![li, chars[i + 1].0], '\u{FEFB}')); // ﻻ
+            i += 2;
+        } else {
+            clusters.push((vec![li], c));
+            i += 1;
+        }
+    }
     let is_letter = |i: i32| -> bool {
-        i >= 0 && (i as usize) < chars.len() && letter_of_char(chars[i as usize].1).is_some()
+        i >= 0 && (i as usize) < clusters.len() && letter_of_char(clusters[i as usize].1).is_some()
     };
     let joins_to_next = |i: usize| -> bool {
-        // letter i connects to letter i+1
+        // glyph i connects to glyph i+1
         is_letter(i as i32)
             && is_letter(i as i32 + 1)
-            && joins_left(letter_of_char(chars[i].1).unwrap().0)
-            && joins_right(letter_of_char(chars[i + 1].1).unwrap().0)
+            && joins_left(letter_of_char(clusters[i].1).unwrap().0)
+            && joins_right(letter_of_char(clusters[i + 1].1).unwrap().0)
     };
-    let shaped = chars
+    let shaped = clusters
         .iter()
         .enumerate()
-        .map(|(i, &(li, c))| {
-            if letter_of_char(c).is_none() {
-                return (li, c, None);
+        .map(|(i, (lis, c))| {
+            if letter_of_char(*c).is_none() {
+                return (lis.clone(), *c, None);
             }
             let prev = i > 0 && joins_to_next(i - 1);
             let next = joins_to_next(i);
@@ -125,7 +143,7 @@ pub fn shaped_forms(text: &str, dir: Dir) -> (Vec<(usize, char, Option<Form>)>, 
                 (true, true) => Form::Medial,
                 (true, false) => Form::Final,
             };
-            (li, c, Some(form))
+            (lis.clone(), *c, Some(form))
         })
         .collect();
     (shaped, rtl)
@@ -143,10 +161,13 @@ pub fn layout(source: &dyn GlyphSource, text: &str, elong: f64, dir: Dir) -> Lin
     let mut placed: Vec<(GlyphImage, f64, char, Form)> = Vec::new();
     let mut spans: Vec<Span> = Vec::new();
     let mut pen_x = 0.0;
-    for (i, &(li, c, form)) in shaped.iter().enumerate() {
+    for (i, (lis, c, form)) in shaped.iter().enumerate() {
+        let (c, form) = (*c, *form);
         let Some(form) = form else {
             // Spaces (and unsupported chars) advance the pen.
-            spans.push(Span { index: li, x: pen_x - SPACE_ADV, width: SPACE_ADV });
+            for &li in lis {
+                spans.push(Span { index: li, x: pen_x - SPACE_ADV, width: SPACE_ADV });
+            }
             pen_x -= SPACE_ADV;
             continue;
         };
@@ -155,17 +176,29 @@ pub fn layout(source: &dyn GlyphSource, text: &str, elong: f64, dir: Dir) -> Lin
         let class = letter_of_char(c).unwrap().0;
         let e = if elongatable(class, form) { elong } else { 0.0 };
         let Some(img) = source.glyph(c, form, e) else {
-            spans.push(Span { index: li, x: pen_x, width: 0.0 });
+            for &li in lis {
+                spans.push(Span { index: li, x: pen_x, width: 0.0 });
+            }
             continue;
         };
         let adv = img.advance;
         placed.push((img, pen_x, c, form));
-        spans.push(Span { index: li, x: pen_x - adv, width: adv });
+        // A ligature's advance is split across its source characters
+        // (visual order = right to left within the glyph).
+        let n = lis.len() as f64;
+        for (k, &li) in lis.iter().enumerate() {
+            let piece = adv / n;
+            spans.push(Span {
+                index: li,
+                x: pen_x - (k as f64 + 1.0) * piece,
+                width: piece,
+            });
+        }
         pen_x -= adv;
         // Gap after a letter that does not connect to the next letter.
         let connects = shaped
             .get(i + 1)
-            .map(|&(_, _, f)| matches!(f, Some(Form::Medial) | Some(Form::Final)))
+            .map(|(_, _, f)| matches!(f, Some(Form::Medial) | Some(Form::Final)))
             .unwrap_or(false);
         if !connects && i + 1 < shaped.len() {
             pen_x -= LETTER_GAP;

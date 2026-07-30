@@ -76,7 +76,7 @@ fn train(out_path: &str) {
         .map(|l| (vec![0.0; l.w.len()], vec![0.0; l.b.len()]))
         .collect();
     let mut v = m.clone();
-    let epochs = 20000;
+    let epochs = 16000;
     for epoch in 1..=epochs {
         let mut grads: Vec<(Vec<f32>, Vec<f32>)> = mlp
             .layers
@@ -92,7 +92,7 @@ fn train(out_path: &str) {
         let t = epoch as i32;
         let (c1, c2) = (1.0 - b1.powi(t), 1.0 - b2.powi(t));
         // Step-decayed learning rate: coarse fit, then settle exactly.
-        let lr: f32 = if epoch <= 8000 { 3e-3 } else if epoch <= 15000 { 1e-3 } else { 3e-4 };
+        let lr: f32 = if epoch <= 6000 { 3e-3 } else if epoch <= 11000 { 1e-3 } else { 3e-4 };
         for (li, l) in mlp.layers.iter_mut().enumerate() {
             let (gw, gb) = &grads[li];
             let (mw, mb) = &mut m[li];

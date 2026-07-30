@@ -57,7 +57,7 @@ JSON header fields:
 | `script`   | `"arabic"`                                         |
 | `style`    | e.g. `"square-kufic"`                              |
 | `alphabet` | string of supported codepoints, index = model id   |
-| `layers`   | layer sizes, e.g. `[61, 128, 128, 236]`            |
+| `layers`   | layer sizes, e.g. `[62, 128, 128, 224]`            |
 
 Hidden layers are ReLU; the output layer is linear. (Quantization to
 f16/int8 is an obvious follow-up; v0 keeps f32 for simplicity.)
@@ -69,24 +69,30 @@ coarse binary grid (strokes 1 cell wide, counters 1 cell), so the
 generative representation is trivial and every part of the pipeline is
 inspectable.
 
-**Input** (61 floats):
-- one-hot letter identity over the alphabet (56: Arabic + Latin
-  capitals) — note dots are *generated*, not input: ب/ت/ث are distinct
-  ids whose shared rasm the model discovers in training;
+**Input** (62 floats):
+- one-hot letter identity over the alphabet (57: Arabic, the لا
+  ligature, and Latin capitals) — note dots are *generated*, not
+  input: ب/ت/ث are distinct ids whose shared rasm the model discovers
+  in training;
 - one-hot joining form (4): isolated / initial / medial / final;
 - elongation scalar ∈ [0,1]. Arabic joined forms stretch their baseline
   connection (kashida); Latin letters stretch a declared column, so
   crossbars extend while stems stay one cell wide.
 
-**Output** (236 floats):
+**Output** (224 floats):
 - 16×14 occupancy grid (threshold at 0.5), canvas right-aligned at the
-  pen position, baseline at row 10, descender zone below;
-- advance width / 16, replicated over 12 slots (averaged at decode) so
-  its gradient is not drowned out by the grid cells.
+  pen position, baseline at row 10, descender zone below.
+
+There is no advance-width output: glyphs are right-aligned on the
+canvas, so the advance is a property of the generated shape — the pen
+moves to the leftmost generated column. The model draws; the metrics
+fall out of the drawing.
 
 **Engine pipeline** (`neuraltype-core`):
 1. *Shape*: Unicode text → joining forms (standard Arabic joining
-   rules; right-joiners د ذ ر ز و ا have no initial/medial forms).
+   rules; right-joiners د ذ ر ز و ا have no initial/medial forms), with
+   mandatory لا ligature substitution — the pair becomes one glyph whose
+   advance is split across both source characters in the cluster map.
 2. *Generate*: one forward pass per glyph → occupancy grid + advance.
 3. *Trace*: exposed cell edges, oriented filled-side-left, chained
    into closed loops → rectilinear `kurbo::BezPath` (outer contours
