@@ -64,6 +64,7 @@ version = "0.1.0"
 dependencies = [
  "kurbo",
  "neuraltype-core",
+ "serde_json",
 ]
 
 [[package]]

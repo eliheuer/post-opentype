@@ -36,8 +36,26 @@ fn main() {
                 args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.0),
             )
         }
-        _ => eprintln!("usage: ntf train|sheet|render ..."),
+        Some("info") => info(args.get(1).map_or("build/kufic.ntf", |s| s)),
+        _ => eprintln!("usage: ntf train|sheet|render|info ..."),
     }
+}
+
+/// Print a .ntf file's header and layout, human-readable.
+fn info(path: &str) {
+    let bytes = std::fs::read(path).expect("font not found");
+    let (header, hlen) = font::read_header(&bytes).unwrap();
+    println!("{}", serde_json::to_string_pretty(&header).unwrap());
+    let weights = (bytes.len() - 8 - hlen) / 4;
+    println!();
+    println!("file:     {} bytes", bytes.len());
+    println!("header:   {hlen} bytes at offset 8");
+    println!(
+        "weights:  {weights} f32 at offset {} (aligned: {})",
+        8 + hlen,
+        (8 + hlen) % 4 == 0
+    );
+    println!("alphabet: {} letters", header.alphabet.chars().count());
 }
 
 /// Build the full training set: every supported (letter, form,

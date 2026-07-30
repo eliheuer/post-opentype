@@ -49,6 +49,17 @@ pub fn save(font: &NeuralFont, style: &str) -> Vec<u8> {
     out
 }
 
+/// Parse just the JSON header of a .ntf file.
+pub fn read_header(bytes: &[u8]) -> Result<(Header, usize), String> {
+    if bytes.len() < 8 || &bytes[..4] != MAGIC {
+        return Err("not a NeuralType (.ntf) file".into());
+    }
+    let hlen = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let header: Header =
+        serde_json::from_slice(&bytes[8..8 + hlen]).map_err(|e| e.to_string())?;
+    Ok((header, hlen))
+}
+
 pub fn load(bytes: &[u8]) -> Result<NeuralFont, String> {
     if bytes.len() < 8 || &bytes[..4] != MAGIC {
         return Err("not a NeuralType (.ntf) file".into());
