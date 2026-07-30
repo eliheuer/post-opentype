@@ -1,10 +1,12 @@
-# Naskh Distilled: Converting TTFs to NTFs
+# Nastaliq Distilled: Converting TTFs to NTFs
 
 **Status: plan for stage 0** (see [NASKH.md](NASKH.md) section 7).
-Convert Amiri, an OFL naskh with the richest contextual behavior in
-open fonts, into a .ntf neural font. The output is a demo, a blog
-post ("Naskh Distilled: converting TTFs to NTFs"), and every pipeline
-component the manuscript work needs, proven on free data.
+Convert Gulzar, the OFL nastaliq, into a .ntf neural font. Nastaliq
+is the style OpenType limits most, so it is the demo that matters.
+The output is a demo, a blog post ("Nastaliq Distilled: converting
+TTFs to NTFs"), and every pipeline component the manuscript work
+needs, proven on free data. Amiri (naskh, calmer geometry) follows on
+the same pipeline.
 
 ## Why distill, given that reproduction is not the goal
 
@@ -69,9 +71,17 @@ depending on the following letter; ر takes 8 final variants depending
 on the preceding one. Medial contexts (to be measured with carrier
 templates) will add more. Amiri also ships 6,710 glyphs total.
 
-Order of targets: Amiri first (a decade of production hardening makes
-it the safe pipeline target), Gulzar second (nastaliq, where the
-cascade begins).
+Gulzar, same probe: 344 distinct first-position variants (ن takes 16
+initial forms, ي 15, م 14), more than double Amiri's contextual
+variance. Cascade measured directly: shaping نستعليق places glyphs at
+y-offsets up to 1.38 em above the baseline; even بسم spans 0.80 em.
+Extraction implication: rustybuzz reports the cursive-attachment
+offsets in glyph positions, so per-glyph training targets are (field,
+displacement), and the engine chains displacements to produce the
+cascade.
+
+Order of targets: Gulzar first (nastaliq is the thesis case), Amiri
+second (naskh regression test for the same pipeline).
 
 ## Open questions to settle by experiment
 

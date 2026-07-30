@@ -156,18 +156,19 @@ claim of the project.
 
 ## 7. Staging
 
-- **Stage 0: naskh distilled (the next demo and blog post).** Convert
-  an existing OFL naskh font (Amiri) to .ntf: shape an all-pairs
-  corpus with rustybuzz, render per-glyph fields, train the field
-  head, composite and trace in the engine, publish under a new OFL
-  name. This is not the goal (section 8 records why reproduction
+- **Stage 0: nastaliq distilled (the next demo and blog post).**
+  Convert Gulzar, the OFL nastaliq, to .ntf: shape an all-pairs corpus
+  with rustybuzz, render per-glyph fields plus cursive-attachment
+  displacements, train the field head, composite and trace in the
+  engine, publish under a new OFL name. Amiri (naskh) follows on the
+  same pipeline. This is not the goal (section 8 records why reproduction
   proves nothing about the tradition); it is the pipeline rehearsal.
   Every component it forces into existence, the extraction tooling,
   the continuous field head, the field compositing, the img2bez
   tracing stage, the tolerance metrics, is exactly the component the
   manuscript work needs, exercised on data that is free. Plan in
   [docs/DISTILL.md](DISTILL.md). Working title for the write-up:
-  "Naskh Distilled: converting TTFs to NTFs."
+  "Nastaliq Distilled: converting TTFs to NTFs."
 - **Stage 1: one hand, linear text.** Train the word-field model on a
   small transcribed corpus from one manuscript hand. Demo: type,
   select, copy, paste manuscript-quality nastaliq words in the

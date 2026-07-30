@@ -12,7 +12,8 @@ const LETTERS: &[char] = &[
 ];
 
 fn main() {
-    let bytes = std::fs::read("data/Amiri-Regular.ttf").expect("run from repo root");
+    let path = std::env::args().nth(1).unwrap_or("data/Amiri-Regular.ttf".into());
+    let bytes = std::fs::read(&path).expect("font not found; run from repo root");
     let face = rustybuzz::Face::from_slice(&bytes, 0).expect("bad font");
 
     let shape = |text: &str| -> Vec<(u32, u32)> {
@@ -50,7 +51,7 @@ fn main() {
         }
     }
 
-    println!("Amiri-Regular: glyph count {}", face.number_of_glyphs());
+    println!("{path}: glyph count {}", face.number_of_glyphs());
     println!("pairs shaped: {total_pairs}, fused into ligatures: {ligature_pairs}");
     println!();
     println!("letter  before-variants  after-variants");
@@ -66,4 +67,20 @@ fn main() {
     println!();
     println!("distinct first-position glyph variants: {total_first}");
     println!("distinct second-position glyph variants: {total_second}");
+
+    // The cascade: per-glyph vertical offsets in a shaped word.
+    // In nastaliq the first letters of a word sit far above the
+    // baseline and step down; in naskh offsets stay near zero.
+    for word in ["نستعليق", "محبت", "بسم"] {
+        let mut buf = rustybuzz::UnicodeBuffer::new();
+        buf.push_str(word);
+        let out = rustybuzz::shape(&face, &[], buf);
+        let ys: Vec<i32> = out.glyph_positions().iter().map(|p| p.y_offset).collect();
+        let upm = face.units_per_em() as f64;
+        let max = ys.iter().cloned().max().unwrap_or(0) as f64 / upm;
+        println!(
+            "cascade {word}: y-offsets {ys:?} (max {:.2} em)",
+            max
+        );
+    }
 }
