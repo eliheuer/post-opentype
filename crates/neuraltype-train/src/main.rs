@@ -228,6 +228,14 @@ fn main() -> candle_core::Result<()> {
     let train_idx: Vec<usize> = (0..n).filter(|i| i % 20 != 0).collect();
     println!("rows: {} train, {} val", train_idx.len(), val_idx.len());
 
+    // Persist the vocabulary up front so mid-training checkpoints can
+    // be exported.
+    std::fs::write(
+        format!("{out_dir}/vocab.json"),
+        serde_json::to_string(&ds.vocab).unwrap(),
+    )
+    .unwrap();
+
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
     let model = Model::new(&vb, ds.vocab.len(), h, w)?;
