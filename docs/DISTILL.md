@@ -83,6 +83,49 @@ cascade.
 Order of targets: Gulzar first (nastaliq is the thesis case), Amiri
 second (naskh regression test for the same pipeline).
 
+## Tools
+
+The extraction pipeline lives in `crates/neuraltype-distill`
+(shaping via [harfrust](https://github.com/harfbuzz/harfrust), the
+HarfBuzz-org Rust port at HarfBuzz 13 parity; outlines via
+ttf-parser):
+
+```sh
+# shape the corpus through a font and write the dataset
+cargo run --release -p neuraltype-distill --bin distill --     extract data/Gulzar-Regular.ttf data/extract-gulzar
+
+# summarize: shape counts per letter, displacement ranges
+cargo run --release -p neuraltype-distill --bin distill --     stats data/extract-gulzar
+```
+
+The corpus is every single letter, ordered pair, and ordered triple
+over 31 Arabic letters (30,783 words); triples capture medial forms in
+their full (previous, next) context. Output is JSONL, inspectable with
+jq:
+
+- `meta.json`: font, units per em, corpus and dedup counts.
+- `glyphs.jsonl`: `{gid, path}`, one SVG path per glyph the corpus
+  touched, font units, y-up.
+- `contexts.jsonl`: one record per cluster occurrence: the word, the
+  cluster's letters, logical index, prev/next letters, its glyphs
+  (base plus marks) placed relative to the cluster origin, and the
+  displacement `(ddx, ddy)` from the previous cluster's origin. The
+  displacement chain is the cascade.
+
+## Extraction results: Gulzar (2026-07-30)
+
+- 30,783 words shaped → 91,263 cluster records.
+- 411 unique glyphs touched; **1,223 unique composed cluster shapes**
+  (base + dots), the training denominator.
+- Per letter, composed: خ 108 distinct shapes, ث 100, ت 98, ي 80,
+  ن 78. Dots multiply the base-form counts.
+- Cluster displacement dy spans −1,662 to +1,190 font units at
+  1000 upm: the cascade drops more than 1.6 em between adjacent
+  letters at the extreme.
+- rustybuzz (HarfBuzz 10) and harfrust (HarfBuzz 13) produce identical
+  counts on this corpus, a useful cross-validation; the pipeline uses
+  harfrust.
+
 ## Open questions to settle by experiment
 
 - Field resolution vs naskh hairlines (64 vs 96 em pixels).

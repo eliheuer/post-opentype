@@ -1,16 +1,16 @@
 [package]
-name = "neuraltype-cli"
+name = "neuraltype-distill"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "ntf"
+name = "distill"
 path = "src/main.rs"
 
 [dependencies]
 neuraltype-core = { path = "../neuraltype-core" }
-kurbo.workspace = true
-serde_json.workspace = true
 ttf-parser = "0.25"
+serde.workspace = true
+serde_json.workspace = true
 harfrust = "0.12.0"

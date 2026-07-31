@@ -1,4 +1,4 @@
-// Stage-0 spike: measure Amiri's contextual richness with rustybuzz.
+// Stage-0 spike: measure a font's contextual richness with harfrust.
 //
 // Shapes an all-pairs corpus and counts, for each Arabic letter and
 // joining position, how many distinct glyphs Amiri actually uses
@@ -14,12 +14,16 @@ const LETTERS: &[char] = &[
 fn main() {
     let path = std::env::args().nth(1).unwrap_or("data/Amiri-Regular.ttf".into());
     let bytes = std::fs::read(&path).expect("font not found; run from repo root");
-    let face = rustybuzz::Face::from_slice(&bytes, 0).expect("bad font");
+    let font_ref = harfrust::FontRef::from_index(&bytes, 0).expect("bad font");
+    let shaper_data = harfrust::ShaperData::new(&font_ref);
+    let face = shaper_data.shaper(&font_ref).build();
+    let ttf = ttf_parser::Face::parse(&bytes, 0).expect("bad font");
 
     let shape = |text: &str| -> Vec<(u32, u32)> {
-        let mut buf = rustybuzz::UnicodeBuffer::new();
+        let mut buf = harfrust::UnicodeBuffer::new();
         buf.push_str(text);
-        let out = rustybuzz::shape(&face, &[], buf);
+        buf.guess_segment_properties();
+        let out = face.shape(buf, harfrust::ShapeOptions::default());
         out.glyph_infos()
             .iter()
             .map(|g| (g.glyph_id, g.cluster))
@@ -51,7 +55,7 @@ fn main() {
         }
     }
 
-    println!("{path}: glyph count {}", face.number_of_glyphs());
+    println!("{path}: glyph count {}", ttf.number_of_glyphs());
     println!("pairs shaped: {total_pairs}, fused into ligatures: {ligature_pairs}");
     println!();
     println!("letter  before-variants  after-variants");
@@ -72,11 +76,12 @@ fn main() {
     // In nastaliq the first letters of a word sit far above the
     // baseline and step down; in naskh offsets stay near zero.
     for word in ["نستعليق", "محبت", "بسم"] {
-        let mut buf = rustybuzz::UnicodeBuffer::new();
+        let mut buf = harfrust::UnicodeBuffer::new();
         buf.push_str(word);
-        let out = rustybuzz::shape(&face, &[], buf);
+        buf.guess_segment_properties();
+        let out = face.shape(buf, harfrust::ShapeOptions::default());
         let ys: Vec<i32> = out.glyph_positions().iter().map(|p| p.y_offset).collect();
-        let upm = face.units_per_em() as f64;
+        let upm = ttf.units_per_em() as f64;
         let max = ys.iter().cloned().max().unwrap_or(0) as f64 / upm;
         println!(
             "cascade {word}: y-offsets {ys:?} (max {:.2} em)",
