@@ -11,6 +11,8 @@
 //! points (see docs/SPEC.md).
 
 pub mod art;
+pub mod field_model;
+pub mod field_text;
 pub mod font;
 pub mod model;
 pub mod shape;

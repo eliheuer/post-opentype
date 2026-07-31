@@ -18,6 +18,7 @@
 //!   glyphs.jsonl   {gid, path} for every glyph the corpus touched
 //!   contexts.jsonl one record per cluster occurrence, see ClusterRec
 
+mod compare;
 mod fields;
 
 use neuraltype_core::art::letter_of_char;
@@ -88,6 +89,12 @@ fn main() {
             args.get(1).expect("usage: distill fields <extract-dir> <out-dir> [em_px]"),
             args.get(2).expect("usage: distill fields <extract-dir> <out-dir> [em_px]"),
             args.get(3).and_then(|s| s.parse().ok()).unwrap_or(64),
+        ),
+        Some("compare") => compare::compare(
+            args.get(1).expect("usage: distill compare <font.ttf> <font.ntf> <out.pgm> <words...>"),
+            args.get(2).expect("ntf path"),
+            args.get(3).expect("out path"),
+            &args[4..],
         ),
         Some("proof") => fields::proof(
             args.get(1).expect("usage: distill proof <fields-dir> <out.pgm> [ids...]"),

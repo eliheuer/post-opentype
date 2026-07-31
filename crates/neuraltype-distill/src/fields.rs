@@ -38,6 +38,8 @@ struct ClusterRec {
     glyphs: Vec<PlacedGlyph>,
     ddx: Option<i32>,
     ddy: Option<i32>,
+    ox: i32,
+    oy: i32,
 }
 
 #[derive(Serialize)]
@@ -56,7 +58,7 @@ struct FieldsMeta {
 }
 
 /// Parse the extract stage's SVG-ish path into a kurbo BezPath.
-fn parse_path(d: &str) -> kurbo::BezPath {
+pub fn parse_path(d: &str) -> kurbo::BezPath {
     let mut p = kurbo::BezPath::new();
     let toks: Vec<&str> = d
         .split_inclusive(|c: char| c.is_ascii_alphabetic())
@@ -110,7 +112,7 @@ fn parse_path(d: &str) -> kurbo::BezPath {
 
 /// Fill a path (nonzero winding) into a supersampled binary grid.
 /// The transform maps font units to pixel space (y flipped).
-fn rasterize(
+pub fn rasterize(
     paths: &[(kurbo::BezPath, f64, f64)], // path, dx, dy in font units
     w: usize,
     h: usize,
@@ -287,7 +289,10 @@ pub fn fields(extract_dir: &str, out_dir: &str, em_px: u32) {
             serde_json::json!({
                 "letters": r.letters, "prev": r.prev, "next": r.next,
                 "prev2": r.prev2, "next2": r.next2,
-                "index": r.index, "shape": id, "ddx": r.ddx, "ddy": r.ddy,
+                "index": r.index, "shape": id,
+                // First cluster carries its absolute origin as the
+                // displacement target; later clusters the delta.
+                "ddx": r.ddx.unwrap_or(r.ox), "ddy": r.ddy.unwrap_or(r.oy),
             })
         )
         .unwrap();
