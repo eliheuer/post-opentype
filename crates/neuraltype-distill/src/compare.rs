@@ -96,6 +96,22 @@ pub fn compare(font_path: &str, ntf_path: &str, out_path: &str, words: &[String]
         }
         x_off += col_w[i] + gap;
     }
+    if out_path.ends_with(".rgba") {
+        // Blog-figure mode: transparent background, teacher row in
+        // the outline gray, model row in the ink green.
+        let split = row0_h + gap * 2;
+        let mut rgba = vec![0u8; sheet_w * sheet_h * 4];
+        for (i, &v) in sheet.iter().enumerate() {
+            if v > 128 {
+                let c: [u8; 4] =
+                    if i / sheet_w < split { [110, 110, 110, 255] } else { [42, 163, 95, 255] };
+                rgba[i * 4..i * 4 + 4].copy_from_slice(&c);
+            }
+        }
+        std::fs::write(out_path, &rgba).unwrap();
+        println!("{sheet_w} {sheet_h}");
+        return;
+    }
     let mut f = std::fs::File::create(out_path).unwrap();
     writeln!(f, "P5\n{sheet_w} {sheet_h}\n255").unwrap();
     f.write_all(&sheet).unwrap();

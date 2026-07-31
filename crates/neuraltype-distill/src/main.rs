@@ -18,6 +18,7 @@
 //!   glyphs.jsonl   {gid, path} for every glyph the corpus touched
 //!   contexts.jsonl one record per cluster occurrence, see ClusterRec
 
+mod cascade;
 mod compare;
 mod fields;
 
@@ -89,6 +90,11 @@ fn main() {
             args.get(1).expect("usage: distill fields <extract-dir> <out-dir> [em_px]"),
             args.get(2).expect("usage: distill fields <extract-dir> <out-dir> [em_px]"),
             args.get(3).and_then(|s| s.parse().ok()).unwrap_or(64),
+        ),
+        Some("cascade") => cascade::cascade(
+            args.get(1).expect("usage: distill cascade <font.ttf> <word> <out.rgba>"),
+            args.get(2).expect("word"),
+            args.get(3).expect("out path"),
         ),
         Some("compare") => compare::compare(
             args.get(1).expect("usage: distill compare <font.ttf> <font.ntf> <out.pgm> <words...>"),
