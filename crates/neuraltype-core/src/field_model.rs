@@ -120,6 +120,17 @@ impl FieldFont {
         })
     }
 
+    pub fn n_params(&self) -> usize {
+        self.t.values().map(|t| t.data.len()).sum()
+    }
+
+    /// The letters this font supports (single chars from the vocab).
+    pub fn alphabet(&self) -> String {
+        let mut v: Vec<&String> = self.vocab.keys().collect();
+        v.sort();
+        v.iter().filter(|s| s.chars().count() == 1).cloned().cloned().collect()
+    }
+
     pub fn vocab_id(&self, s: &str) -> Option<u32> {
         self.vocab.get(s).copied()
     }
