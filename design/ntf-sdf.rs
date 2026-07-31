@@ -63,8 +63,10 @@ fn main() {
             let px = if edge {
                 [239, 68, 68, 255]
             } else {
-                // compress u8 SDF into a readable gray ramp
-                let g = 25 + (v as u32 * 190 / 255) as u8;
+                // quantize the SDF into 8 hard gray bands: the smooth
+                // ramp reads as blur, the bands read as a pixel grid
+                let q = (v / 32) as u32;
+                let g = (25 + q * 27) as u8;
                 [g, g, g, 255]
             };
             right[i * 4..i * 4 + 4].copy_from_slice(&px);
