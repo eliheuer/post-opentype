@@ -236,13 +236,22 @@ fn main() -> candle_core::Result<()> {
     )
     .unwrap();
 
-    let varmap = VarMap::new();
+    let mut varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
     let model = Model::new(&vb, ds.vocab.len(), h, w)?;
+    // Resume: if a checkpoint already exists in out-dir, load it and
+    // continue training from there (optimizer state starts fresh).
+    let ckpt = format!("{out_dir}/checkpoint.safetensors");
+    if std::path::Path::new(&ckpt).exists() {
+        varmap.load(&ckpt)?;
+        println!("resumed from {ckpt}");
+    }
     let nparams: usize = varmap.all_vars().iter().map(|v| v.elem_count()).sum();
     println!("model: {nparams} params ({:.1} MB f32)", nparams as f64 * 4.0 / 1e6);
 
-    let mut opt = candle_nn::AdamW::new_lr(varmap.all_vars(), 3e-4)?;
+    let lr: f64 = std::env::var("NTF_LR").ok().and_then(|v| v.parse().ok()).unwrap_or(3e-4);
+    println!("lr: {lr}");
+    let mut opt = candle_nn::AdamW::new_lr(varmap.all_vars(), lr)?;
 
     let feats_of = |idx: &[usize]| -> candle_core::Result<Tensor> {
         let flat: Vec<u32> = idx.iter().flat_map(|&i| ds.feats[i]).collect();
