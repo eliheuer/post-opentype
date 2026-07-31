@@ -182,6 +182,15 @@ weights.
   train loss 0.213 → 0.012 in two epochs, contour IoU 0.27 and
   climbing. A converged run wants a GPU (Metal or the CUDA box).
 
+## Tracing status
+
+The demo currently traces the composited field with sub-pixel marching
+squares (`neuraltype_core::field_text::trace_field`): dense polylines,
+correct but not font-quality point structure. img2bez remains the
+planned quality pass, to be wired once the model's edges are worth
+tracing well; marching squares stays as the fallback. Decision
+2026-07-30: keep it simple until the basics work.
+
 ## Open questions to settle by experiment
 
 - Field resolution vs naskh hairlines (64 vs 96 em pixels).
