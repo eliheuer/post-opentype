@@ -163,6 +163,25 @@ Gulzar-via-.ntf renders of the same text side by side, with a
 file-size table (Gulzar-Regular.ttf is 963 KB; the .ntf size is a
 result we do not have yet).
 
+## Training stage (built, 2026-07-30)
+
+`crates/neuraltype-train` (candle; CPU by default, Accelerate, Metal,
+or CUDA behind cargo features). Training uses a framework; inference
+stays hand-rolled in the engine, and the exported .ntf carries raw
+weights.
+
+- Context: after measuring that trigram context leaves 358 of 31,743
+  tuples shape-ambiguous in Gulzar, the window widened to
+  (prev2, prev, letter, next, next2). At five tokens the ambiguity is
+  **zero**: context fully determines the shape, so exact reproduction
+  is learnable in principle.
+- Model: shared context embeddings → 256 latent → five stride-2
+  deconvolutions to the 155×219 SDF canvas, plus a displacement head
+  for the cascade. 1.36M parameters, 5.4 MB f32.
+- First measurement (M-series CPU with Accelerate): 481 s/epoch;
+  train loss 0.213 → 0.012 in two epochs, contour IoU 0.27 and
+  climbing. A converged run wants a GPU (Metal or the CUDA box).
+
 ## Open questions to settle by experiment
 
 - Field resolution vs naskh hairlines (64 vs 96 em pixels).
