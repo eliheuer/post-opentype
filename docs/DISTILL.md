@@ -126,6 +126,43 @@ jq:
   counts on this corpus, a useful cross-validation; the pipeline uses
   harfrust.
 
+## Fields stage (built, 2026-07-30)
+
+`distill fields <extract-dir> <out-dir> [em_px]` dedupes the context
+records to unique composed shapes, rasterizes each (kurbo flattening,
+nonzero scanline fill, 4× supersample), computes an exact Euclidean
+signed-distance field (Felzenszwalb transform), clamps at 1/8 em, and
+writes one u8 grid per shape plus `dataset.jsonl` mapping every
+context row to its shape id. `distill proof <fields-dir> <out.pgm>
+[ids…]` renders a proof sheet (convert with magick; threshold at 50%
+to see the traced contour).
+
+Gulzar results:
+
+- 1,145 unique shapes (shape-level dedup; the 1,223 earlier counted
+  letter-and-shape pairs, and some shapes are shared, e.g. ي/ى).
+- Shape bbox relative to the cluster origin spans x −740..1427,
+  y −1601..1570 font units: nastaliq swashes and cascade-carried marks
+  make the cluster canvas large.
+- Canvas at 64 px/em: **155×219 px**; dataset 38.9 MB u8.
+- **Resolution decision: 64 px/em.** Thresholded contours at 64 hold
+  Gulzar's tapers and hairlines; 96 is visually indistinguishable at
+  reading scale and costs 2.3× the outputs (a 96 dataset is also
+  generated for a fidelity ablation later).
+- Implication for the model head: 155×219 = 33,945 outputs per shape.
+  A dense final layer at that width is ~10M parameters, so the train
+  stage starts with a small deconv decoder, and a cropped or
+  origin-tightened canvas is the fallback.
+
+## Comparison images (planned)
+
+Quality and file-size comparisons for the blog post, generated with
+designbot in the style of the Virtua Grotesk specimen proofs (dark
+ground, subtle grid, light letterforms): Gulzar-via-OpenType vs
+Gulzar-via-.ntf renders of the same text side by side, with a
+file-size table (Gulzar-Regular.ttf is 963 KB; the .ntf size is a
+result we do not have yet).
+
 ## Open questions to settle by experiment
 
 - Field resolution vs naskh hairlines (64 vs 96 em pixels).

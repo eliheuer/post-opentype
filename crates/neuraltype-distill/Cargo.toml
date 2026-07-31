@@ -14,3 +14,4 @@ ttf-parser = "0.25"
 serde.workspace = true
 serde_json.workspace = true
 harfrust = "0.12.0"
+kurbo.workspace = true

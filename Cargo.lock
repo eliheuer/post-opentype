@@ -130,6 +130,7 @@ name = "neuraltype-distill"
 version = "0.1.0"
 dependencies = [
  "harfrust",
+ "kurbo",
  "neuraltype-core",
  "serde",
  "serde_json",
