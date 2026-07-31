@@ -28,7 +28,7 @@ fn main() {
     let mut ctx = Canvas::new(W, H);
     ctx.background(Color::rgb(12, 12, 12));
 
-    let scale = 8.5;
+    let scale = 8.0; // integer: panels are blitted pre-upscaled, no resampling blur
     let pw = CW as f64 * scale;
     let ph = CH as f64 * scale;
     let gap = (W - 2.0 * pw) / 3.0;
@@ -76,13 +76,22 @@ fn main() {
     ctx.rect(gap, y0, pw, ph);
     ctx.rect(gap * 2.0 + pw, y0, pw, ph);
 
-    ctx.translate(gap, y0);
-    ctx.scale(scale);
-    ctx.image_rgba(left, CW as u32, CH as u32, 0.0, 0.0, 1.0);
-    ctx.scale(1.0 / scale);
-    ctx.translate(gap + pw, 0.0);
-    ctx.scale(scale);
-    ctx.image_rgba(right, CW as u32, CH as u32, 0.0, 0.0, 1.0);
+    // nearest-neighbor upscale, drawn 1:1 so pixels stay crisp
+    let s = scale as usize;
+    let up = |src: &[u8]| {
+        let (uw, uh) = (CW * s, CH * s);
+        let mut out = vec![0u8; uw * uh * 4];
+        for y in 0..uh {
+            for x in 0..uw {
+                let i = ((y / s) * CW + x / s) * 4;
+                let o = (y * uw + x) * 4;
+                out[o..o + 4].copy_from_slice(&src[i..i + 4]);
+            }
+        }
+        out
+    };
+    ctx.image_rgba(up(&left), (CW * s) as u32, (CH * s) as u32, gap, y0, 1.0);
+    ctx.image_rgba(up(&right), (CW * s) as u32, (CH * s) as u32, gap * 2.0 + pw, y0, 1.0);
 
     let renderer = Renderer::new(W as u32, H as u32);
     renderer
