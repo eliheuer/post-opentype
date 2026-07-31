@@ -52,6 +52,9 @@ struct ClusterRec {
     /// Letters immediately before/after in logical order, if any.
     prev: Option<char>,
     next: Option<char>,
+    /// Second-order neighbors; Gulzar's rules reach this far.
+    prev2: Option<char>,
+    next2: Option<char>,
     /// Base glyph and marks, placed relative to the cluster origin.
     glyphs: Vec<PlacedGlyph>,
     /// Displacement from the previous cluster's origin to this one
@@ -206,8 +209,14 @@ fn extract(font_path: &str, out_dir: &str) {
                 .filter(|(i, _)| *i >= ck as usize && *i < end)
                 .map(|(_, c)| c)
                 .collect();
-            let prev = chars.iter().rev().find(|(i, _)| *i < ck as usize).map(|(_, c)| *c);
-            let next = chars.iter().find(|(i, _)| *i >= end).map(|(_, c)| *c);
+            let before: Vec<char> =
+                chars.iter().rev().filter(|(i, _)| *i < ck as usize).map(|(_, c)| *c).collect();
+            let after: Vec<char> =
+                chars.iter().filter(|(i, _)| *i >= end).map(|(_, c)| *c).collect();
+            let prev = before.first().copied();
+            let prev2 = before.get(1).copied();
+            let next = after.first().copied();
+            let next2 = after.get(1).copied();
 
             let (ddx, ddy) = match prev_origin {
                 Some((px, py)) => (Some(bx - px), Some(by - py)),
@@ -225,6 +234,8 @@ fn extract(font_path: &str, out_dir: &str) {
                 index: ci,
                 prev,
                 next,
+                prev2,
+                next2,
                 glyphs: rel,
                 ddx,
                 ddy,

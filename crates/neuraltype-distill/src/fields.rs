@@ -31,6 +31,10 @@ struct ClusterRec {
     index: usize,
     prev: Option<char>,
     next: Option<char>,
+    #[serde(default)]
+    prev2: Option<char>,
+    #[serde(default)]
+    next2: Option<char>,
     glyphs: Vec<PlacedGlyph>,
     ddx: Option<i32>,
     ddy: Option<i32>,
@@ -282,6 +286,7 @@ pub fn fields(extract_dir: &str, out_dir: &str, em_px: u32) {
             "{}",
             serde_json::json!({
                 "letters": r.letters, "prev": r.prev, "next": r.next,
+                "prev2": r.prev2, "next2": r.next2,
                 "index": r.index, "shape": id, "ddx": r.ddx, "ddy": r.ddy,
             })
         )

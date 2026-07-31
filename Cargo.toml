@@ -5,6 +5,7 @@ members = [
     "crates/neuraltype-cli",
     "crates/neuraltype-wasm",
     "crates/neuraltype-distill",
+    "crates/neuraltype-train",
 ]
 
 [workspace.package]
