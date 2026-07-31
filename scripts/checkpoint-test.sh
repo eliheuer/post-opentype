@@ -5,7 +5,7 @@
 set -e
 RUN=${1:-data/train-gulzar-run1}
 shift 2>/dev/null || true
-WORDS=${@:-"نستعليق قلم سلام محبت"}
+WORDS=${@:-"بسم الله الرحمن الرحيم"}
 cargo run --release -p neuraltype-train --features metal --bin ntf-train -- \
     export "$RUN" data/fields-gulzar-64 nastaliq-gulzar build/gulzar-live.ntf
 cargo run --release -p neuraltype-distill --bin distill -- \
