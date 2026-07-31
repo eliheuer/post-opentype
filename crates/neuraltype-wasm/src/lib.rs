@@ -101,7 +101,8 @@ impl NtfFont {
 /// works unchanged.
 fn shape_field(f: &FieldFont, text: &str) -> String {
     let em = f.canvas.em_px;
-    let space = 0.4 * em;
+    // Gulzar's own space glyph advances 0.12 em (hmtx); match it.
+    let space = 0.12 * em;
     let mut pen_right = 0.0f64;
     let mut paths: Vec<String> = Vec::new();
     let mut spans: Vec<serde_json::Value> = Vec::new();
@@ -125,13 +126,31 @@ fn shape_field(f: &FieldFont, text: &str) -> String {
             char_base += n_chars + 1;
             continue;
         }
-        // place word: right edge of its grid at pen_right
-        let dx = pen_right - (wf.x0 + wf.w as f64);
+        // ink bounds within the composed grid: the grid carries the
+        // model's canvas padding, and advancing by the padded width
+        // spreads words far apart (the em-scale gap bug)
+        let (mut ix0, mut ix1, mut iy0, mut iy1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+        for y in 0..wf.h {
+            for x in 0..wf.w {
+                if wf.grid[y * wf.w + x] >= 0.0 {
+                    ix0 = ix0.min(x);
+                    ix1 = ix1.max(x);
+                    iy0 = iy0.min(y);
+                    iy1 = iy1.max(y);
+                }
+            }
+        }
+        if ix0 == usize::MAX {
+            char_base += n_chars + 1;
+            continue;
+        }
+        // place word: right edge of its INK at pen_right
+        let dx = pen_right - (wf.x0 + ix1 as f64 + 1.0);
         let path = field_text::trace_field(&wf.grid, wf.w, wf.h);
         let path = kurbo::Affine::translate((wf.x0 + dx, wf.y0)) * path;
         paths.push(path.to_svg());
-        y_min = y_min.min(wf.y0);
-        y_max = y_max.max(wf.y0 + wf.h as f64);
+        y_min = y_min.min(wf.y0 + iy0 as f64);
+        y_max = y_max.max(wf.y0 + iy1 as f64 + 1.0);
 
         // spans: cluster k covers x from its origin to the previous
         // cluster's origin (RTL); first cluster reaches the right edge.
@@ -139,7 +158,8 @@ fn shape_field(f: &FieldFont, text: &str) -> String {
         let mut ci = 0usize; // char offset within word
         for (k, c) in cl.iter().enumerate() {
             let right = if k == 0 { pen_right } else { cl[k - 1].ox + dx };
-            let left = if k + 1 < cl.len() { cl[k + 1].ox + dx } else { wf.x0 + dx };
+            let left =
+                if k + 1 < cl.len() { cl[k + 1].ox + dx } else { wf.x0 + ix0 as f64 + dx };
             let nch = c.letters.chars().count();
             // one span per source char, splitting the cluster width
             let cw = (right - left).max(1.0) / nch as f64;
@@ -153,7 +173,7 @@ fn shape_field(f: &FieldFont, text: &str) -> String {
             let _ = left;
             ci += nch;
         }
-        pen_right -= wf.w as f64 + space;
+        pen_right -= (ix1 - ix0 + 1) as f64 + space;
         char_base += n_chars + 1; // + the following space
     }
     let width = -pen_right - space.min(-pen_right);
