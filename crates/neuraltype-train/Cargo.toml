@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 candle-core = "0.9"
 candle-nn = "0.9"
+safetensors = "0.8.0"
 serde.workspace = true
 serde_json.workspace = true
 

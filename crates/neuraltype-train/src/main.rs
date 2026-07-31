@@ -14,6 +14,8 @@
 //!
 //! Usage: ntf-train <fields-dir> <out-dir> [epochs]
 
+mod export;
+
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{
     conv_transpose2d, embedding, linear, ConvTranspose2dConfig, Module, Optimizer, VarBuilder,
@@ -190,6 +192,15 @@ impl Model {
 
 fn main() -> candle_core::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("export") {
+        export::export(
+            args.get(1).expect("usage: ntf-train export <train-dir> <fields-dir> <style> <out.ntf>"),
+            args.get(2).expect("fields dir"),
+            args.get(3).expect("style"),
+            args.get(4).expect("out path"),
+        );
+        return Ok(());
+    }
     let fields_dir = args.first().expect("usage: ntf-train <fields-dir> <out-dir> [epochs]");
     let out_dir = args.get(1).expect("usage: ntf-train <fields-dir> <out-dir> [epochs]");
     let epochs: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
