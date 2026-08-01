@@ -66,7 +66,53 @@ library. Each font is then a small delta against the prior:
   supplies indices and small corrections.
 
 The prior amortizes across every font. A per-font file could then be
-smaller than its OpenType equivalent. Open questions:
+smaller than its OpenType equivalent.
+
+### LoRA attachment, mapped to the current architecture
+
+Assume a prior with the same layer types as the current model, scaled
+up (the virtua-12m class). A font delta then contains:
+
+- **Embeddings, stored in full.** `emb.weight` is (vocab, 24) = 816
+  params today. Each font trains its own token embeddings against
+  the frozen prior. This is cheap and it carries most of the
+  font-specific identity signal into the shared layers.
+- **LoRA on the dense layers.** For a weight W of shape (out, in),
+  store two factors A (out, r) and B (r, in), and compute
+  W' = W + A·B. At rank r = 8:
+  - `l2` (4480 x 256), the largest dense layer: full is 1.15M
+    params; the LoRA pair is (4480 + 256) x 8 = 37.9k.
+  - `l1` (256 x 120): 3.0k. `disp` (2 x 256): negligible, store in
+    full.
+- **LoRA on the deconvolutions.** Reshape each ConvTranspose2d
+  weight (in, out, k, k) to a matrix (in, out·k·k) and apply the
+  same A·B factorization. At r = 8 the five layers cost roughly
+  9k + 5k + 3k + 2k + 1k = 20k params. If that underfits, add
+  per-channel scale and bias (FiLM-style) for +2 params per channel.
+- **Biases, stored in full.** They are small and font-specific.
+
+Estimated delta at r = 8: about 100k params. That is 400 KB in f32,
+100 KB in int8, and less after entropy coding. The delta is then
+smaller than most OpenType fonts, and ten or more times smaller than
+a standalone .ntf.
+
+Rank is the quality dial. Measure r in {4, 8, 16, 32} with the
+protocol below; the correct rank is the smallest one that passes the
+worst-20 proof sheet. Expect the decoder layers to need higher rank
+than the context layers, because they carry the style.
+
+Training recipe: freeze the prior, train embeddings + LoRA factors
+with the same loss as today (field MSE + 0.1 x masked displacement
+MSE). Distill from the same teacher pipeline. Nothing in the
+extraction or fields stages changes.
+
+An alternative to test against LoRA: a single font vector fed to the
+prior as one extra conditioning token (a hypernetwork-lite). Smaller
+still, but it caps how far a font can move from the prior. LoRA can
+express a new style; a font token can mostly interpolate known
+styles.
+
+Open questions:
 
 - Does the existing virtua-12m model work as a prior? It must learn
   Arabic letterform structure before it can help nastaliq. Check what
