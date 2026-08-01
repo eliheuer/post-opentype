@@ -91,6 +91,13 @@ fn main() {
             args.get(2).expect("usage: distill fields <extract-dir> <out-dir> [em_px]"),
             args.get(3).and_then(|s| s.parse().ok()).unwrap_or(64),
         ),
+        Some("renderword") => renderword(
+            args.get(1).expect("usage: distill renderword <font.ntf> <word> <out.rgba> [upsample] [accuracy]"),
+            args.get(2).expect("word"),
+            args.get(3).expect("out path"),
+            args.get(4).and_then(|s| s.parse().ok()).unwrap_or(2),
+            args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0.8),
+        ),
         Some("cascade") => cascade::cascade(
             args.get(1).expect("usage: distill cascade <font.ttf> <word> <out.rgba>"),
             args.get(2).expect("word"),
@@ -114,6 +121,28 @@ fn main() {
 /// Corpus: every single letter, every ordered pair, every ordered
 /// triple. Triples are what capture medial forms in their full
 /// (previous, next) context.
+/// Render one word from a .ntf with the smooth tracer at 8x display
+/// scale, for tracer parameter A/B tests. Writes RGBA, prints "W H".
+fn renderword(ntf: &str, word: &str, out: &str, upsample: usize, accuracy: f64) {
+    use neuraltype_core::{field_model::FieldFont, field_text};
+    let font = FieldFont::load(&std::fs::read(ntf).expect("ntf")).expect("field font");
+    let wf = field_text::compose_word(&font, word);
+    let path = field_text::trace_field_smooth_with(&wf.grid, wf.w, wf.h, upsample, accuracy);
+    // traced path is y-down pixels; rasterize expects y-up, so flip
+    let path = kurbo::Affine::new([1.0, 0.0, 0.0, -1.0, 0.0, wf.h as f64]) * path;
+    let scale = 8.0f64;
+    let (w, h) = ((wf.w as f64 * scale) as usize, (wf.h as f64 * scale) as usize);
+    let grid = fields::rasterize(&[(path, 0.0, 0.0)], w, h, scale, 0.0, wf.h as f64);
+    let mut rgba = vec![0u8; w * h * 4];
+    for (i, &on) in grid.iter().enumerate() {
+        if on {
+            rgba[i * 4..i * 4 + 4].copy_from_slice(&[42, 163, 95, 255]);
+        }
+    }
+    std::fs::write(out, &rgba).unwrap();
+    println!("{w} {h}");
+}
+
 fn corpus() -> Vec<String> {
     let mut words = Vec::new();
     for &a in LETTERS {
@@ -128,6 +157,43 @@ fn corpus() -> Vec<String> {
         for &b in LETTERS {
             for &c in LETTERS {
                 words.push([a, b, c].iter().collect());
+            }
+        }
+    }
+    // Corpus v2: real words past three letters, appended AFTER the
+    // combinatorial corpus so existing shape indices and vocab ids
+    // stay stable and a checkpoint can resume onto the new dataset.
+    // الله is also where Gulzar's لله ligature appears: harfbuzz
+    // merges ل+ل+ه into one cluster, which becomes a vocab token
+    // exactly like the لا fuse.
+    for w in ["الله", "الرحمن", "الرحيم"] {
+        words.push(w.to_string());
+    }
+    // Key Quranic texts, unvocalized, hamza carriers folded to bare
+    // letters from LETTERS (the demo folds input the same way). One
+    // entry per unique word, order preserved.
+    let texts = [
+        // Al-Fatiha
+        "بسم الله الرحمن الرحيم",
+        "الحمد لله رب العالمين",
+        "الرحمن الرحيم",
+        "مالك يوم الدين",
+        "اياك نعبد واياك نستعين",
+        "اهدنا الصراط المستقيم",
+        "صراط الذين انعمت عليهم غير المغضوب عليهم ولا الضالين",
+        // Al-Ikhlas
+        "قل هو الله احد",
+        "الله الصمد",
+        "لم يلد ولم يولد",
+        "ولم يكن له كفوا احد",
+        // نستعليق, the word this post keeps measuring
+        "نستعليق",
+    ];
+    let mut seen: HashSet<String> = words.iter().cloned().collect();
+    for t in texts {
+        for w in t.split(' ') {
+            if seen.insert(w.to_string()) {
+                words.push(w.to_string());
             }
         }
     }

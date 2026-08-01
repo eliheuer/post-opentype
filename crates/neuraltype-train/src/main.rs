@@ -190,6 +190,27 @@ impl Model {
     }
 }
 
+/// If the dataset vocabulary grew since the checkpoint was written
+/// (corpus extension), expand emb.weight in place: keep the old rows,
+/// add small random rows for the new tokens. Ids stay stable because
+/// new corpus words append after the old ones.
+fn expand_checkpoint_vocab(ckpt: &str, vocab_len: usize) -> candle_core::Result<()> {
+    let dev = Device::Cpu;
+    let mut t = candle_core::safetensors::load(ckpt, &dev)?;
+    let emb = t.get("emb.weight").expect("emb.weight in checkpoint").clone();
+    let (rows, cols) = emb.dims2()?;
+    if rows == vocab_len {
+        return Ok(());
+    }
+    assert!(rows < vocab_len, "checkpoint vocab larger than dataset vocab");
+    let extra = Tensor::randn(0f32, 0.02f32, (vocab_len - rows, cols), &dev)?;
+    let expanded = Tensor::cat(&[&emb, &extra], 0)?;
+    println!("expanded emb.weight: {rows} -> {vocab_len} rows");
+    t.insert("emb.weight".to_string(), expanded);
+    candle_core::safetensors::save(&t, ckpt)?;
+    Ok(())
+}
+
 fn main() -> candle_core::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("export") {
@@ -243,6 +264,7 @@ fn main() -> candle_core::Result<()> {
     // continue training from there (optimizer state starts fresh).
     let ckpt = format!("{out_dir}/checkpoint.safetensors");
     if std::path::Path::new(&ckpt).exists() {
+        expand_checkpoint_vocab(&ckpt, ds.vocab.len())?;
         varmap.load(&ckpt)?;
         println!("resumed from {ckpt}");
     }

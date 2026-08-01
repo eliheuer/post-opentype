@@ -20,14 +20,21 @@ pub struct Cluster {
 pub fn word_clusters(font: &FieldFont, chars: &[char]) -> Vec<(String, [u32; 5])> {
     // cluster char ranges
     let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == 'ل' && i + 1 < chars.len() && chars[i + 1] == 'ا' {
-            ranges.push((i, i + 2));
-            i += 2;
-        } else {
-            ranges.push((i, i + 1));
-            i += 1;
+    if chars == ['\u{627}', '\u{644}', '\u{644}', '\u{647}'] {
+        // Gulzar ligates لله after the alif in the word الله: harfbuzz
+        // shapes it as [ا][لله]. Match the teacher's clustering.
+        ranges.push((0, 1));
+        ranges.push((1, 4));
+    } else {
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == 'ل' && i + 1 < chars.len() && chars[i + 1] == 'ا' {
+                ranges.push((i, i + 2));
+                i += 2;
+            } else {
+                ranges.push((i, i + 1));
+                i += 1;
+            }
         }
     }
     let none = font.none_id();
@@ -135,6 +142,53 @@ pub fn compose_word(font: &FieldFont, word: &str) -> WordField {
         }
     }
     WordField { grid, w, h, x0, y0, clusters }
+}
+
+/// Trace with sub-pixel smoothing: bilinearly upsample the field 2x,
+/// run marching squares on the finer grid, fit smooth curves to the
+/// traced polygons, and scale back. The SDF is a continuous surface,
+/// so interpolation recovers detail the pixel-rate trace drops; the
+/// curve fit removes the stair steps.
+pub fn trace_field_smooth(grid: &[f32], w: usize, h: usize) -> BezPath {
+    // 3x upsample and a fit tolerance of 1.2 upsampled pixels (0.4
+    // source pixels): chosen visually against 2x/0.8 and 4x/1.6 on
+    // نستعليق renders; 4x is marginally rounder at twice the cost.
+    trace_field_smooth_with(grid, w, h, 3, 1.2)
+}
+
+/// Parameterized smooth trace: `s` is the upsample factor, `accuracy`
+/// is the curve-fit tolerance in upsampled pixels.
+pub fn trace_field_smooth_with(
+    grid: &[f32],
+    w: usize,
+    h: usize,
+    s: usize,
+    accuracy: f64,
+) -> BezPath {
+    if w == 0 || h == 0 {
+        return BezPath::new();
+    }
+    let (uw, uh) = (w * s, h * s);
+    let mut up = vec![-1.0f32; uw * uh];
+    for y in 0..uh {
+        let fy = ((y as f32 + 0.5) / s as f32 - 0.5).max(0.0);
+        let y0 = (fy.floor() as usize).min(h - 1);
+        let y1 = (y0 + 1).min(h - 1);
+        let ty = (fy - y0 as f32).clamp(0.0, 1.0);
+        for x in 0..uw {
+            let fx = ((x as f32 + 0.5) / s as f32 - 0.5).max(0.0);
+            let x0 = (fx.floor() as usize).min(w - 1);
+            let x1 = (x0 + 1).min(w - 1);
+            let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+            let a = grid[y0 * w + x0] * (1.0 - tx) + grid[y0 * w + x1] * tx;
+            let b = grid[y1 * w + x0] * (1.0 - tx) + grid[y1 * w + x1] * tx;
+            up[y * uw + x] = a * (1.0 - ty) + b * ty;
+        }
+    }
+    let traced = trace_field(&up, uw, uh);
+    let opts = kurbo::simplify::SimplifyOptions::default();
+    let fitted = kurbo::simplify::simplify_bezpath(traced, accuracy, &opts);
+    kurbo::Affine::scale(1.0 / s as f64) * fitted
 }
 
 /// Marching squares with linear interpolation: extract the iso-0

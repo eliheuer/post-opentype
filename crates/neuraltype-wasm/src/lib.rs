@@ -146,7 +146,7 @@ fn shape_field(f: &FieldFont, text: &str) -> String {
         }
         // place word: right edge of its INK at pen_right
         let dx = pen_right - (wf.x0 + ix1 as f64 + 1.0);
-        let path = field_text::trace_field(&wf.grid, wf.w, wf.h);
+        let path = field_text::trace_field_smooth(&wf.grid, wf.w, wf.h);
         let path = kurbo::Affine::translate((wf.x0 + dx, wf.y0)) * path;
         paths.push(path.to_svg());
         y_min = y_min.min(wf.y0 + iy0 as f64);
