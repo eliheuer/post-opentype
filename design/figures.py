@@ -39,6 +39,9 @@ def clusters(word):
     """Cluster letters + 5-token features, with the لا fuse."""
     chars = list(word)
     cl = []
+    if chars == ["\u0627", "\u0644", "\u0644", "\u0647"]:  # الله
+        cl = ["\u0627", "\u0644\u0644\u0647"]  # [ا][لله], as the teacher clusters it
+        chars = []
     i = 0
     while i < len(chars):
         if chars[i] == "ل" and i + 1 < len(chars) and chars[i + 1] == "ا":
