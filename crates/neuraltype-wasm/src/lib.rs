@@ -323,10 +323,17 @@ fn shape_field(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> String {
                     "w": cw_,
                 }));
                 if i <= n {
-                    // caret nodes: the cluster origin, with intra-
-                    // cluster indices spread toward the left edge
-                    let t = j as f64 / nch as f64;
-                    nodes[i] = (ox + (left - ox) * t, oy);
+                    if nch == 1 {
+                        // the chain origin itself
+                        nodes[i] = (ox, oy);
+                    } else {
+                        // ligatures: one node per character cell,
+                        // spread across the cluster's visual span --
+                        // the origin can sit at either end of a wide
+                        // ligature, and stacking nodes there clumps
+                        // the strand
+                        nodes[i] = (right - (j as f64 + 0.5) * cw_, oy);
+                    }
                 }
             }
             ci += nch;
