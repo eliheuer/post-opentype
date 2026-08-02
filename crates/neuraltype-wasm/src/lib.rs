@@ -87,6 +87,57 @@ impl NtfFont {
         }
     }
 
+    /// Selection cloud for field fonts: the union of the selected
+    /// clusters' fields, traced at a raised iso level. The SDF gives
+    /// the dilation for free, so the outline is a smooth blob that
+    /// hugs the ink -- the cloud band of manuscript illumination,
+    /// not a row of boxes. Returns an SVG path in line coordinates.
+    pub fn selection_path(&self, text: &str, start: usize, end: usize) -> String {
+        let f = match &self.inner {
+            Font::Field(f) => f,
+            _ => return String::new(),
+        };
+        if end <= start {
+            return String::new();
+        }
+        let line = build_field_line(f, text);
+        let shift = line.width;
+        let mut combined = String::new();
+        for pw in &line.words {
+            let a = start.max(pw.char_base);
+            let b = end.min(pw.char_base + pw.n_chars);
+            if a >= b {
+                continue;
+            }
+            let mut ci = 0usize;
+            let mask: Vec<bool> = pw
+                .wf
+                .clusters
+                .iter()
+                .map(|c| {
+                    let nch = c.letters.chars().count();
+                    let cs = pw.char_base + ci;
+                    ci += nch;
+                    cs < end && cs + nch > start
+                })
+                .collect();
+            let sel =
+                field_text::compose_clusters(f, pw.wf.clusters.clone(), Some(&mask));
+            if sel.w == 0 {
+                continue;
+            }
+            // +0.45 of the spread (8 px) dilates the zero contour by
+            // about 3.6 px
+            let dil: Vec<f32> = sel.grid.iter().map(|v| v + 0.45).collect();
+            let path = field_text::trace_field_smooth(&dil, sel.w, sel.h);
+            let path =
+                kurbo::Affine::translate((sel.x0 + pw.dx + shift, sel.y0 - line.y_min)) * path;
+            combined.push_str(&path.to_svg());
+            combined.push(' ');
+        }
+        combined
+    }
+
     pub fn alphabet(&self) -> String {
         match &self.inner {
             Font::Kufic(f) => f.alphabet.iter().collect(),
@@ -98,25 +149,38 @@ impl NtfFont {
 /// Layout for field fonts: words composed by the model, laid out RTL
 /// on a shared baseline. Coordinates are in field pixels (em_px per
 /// em); the JSON contract matches the v0 shape() so the demo island
-/// works unchanged.
-fn shape_field(f: &FieldFont, text: &str) -> String {
+/// works unchanged. Extra field-font data: `nodes`, one 2D point per
+/// logical caret index, on the displacement chain.
+struct PlacedWord {
+    wf: field_text::WordField,
+    dx: f64,
+    char_base: usize,
+    n_chars: usize,
+    ix0: usize,
+    ix1: usize,
+}
+
+struct FieldLine {
+    words: Vec<PlacedWord>,
+    width: f64,
+    y_min: f64,
+    y_max: f64,
+    space: f64,
+    total_chars: usize,
+}
+
+fn build_field_line(f: &FieldFont, text: &str) -> FieldLine {
     let em = f.canvas.em_px;
     // Gulzar's own space glyph advances 0.12 em (hmtx); match it.
     let space = 0.12 * em;
     let mut pen_right = 0.0f64;
-    let mut paths: Vec<String> = Vec::new();
-    let mut spans: Vec<serde_json::Value> = Vec::new();
     let mut y_min = -1.2 * em;
     let mut y_max = 0.5 * em;
-
-    // logical char index base per word
+    let mut words = Vec::new();
     let mut char_base = 0usize;
     for word in text.split(' ') {
         let n_chars = word.chars().count();
         if word.is_empty() {
-            // an explicit space character: give it a span
-            spans.push(serde_json::json!({
-                "i": char_base, "x": pen_right - space, "w": space }));
             pen_right -= space;
             char_base += 1;
             continue;
@@ -128,7 +192,7 @@ fn shape_field(f: &FieldFont, text: &str) -> String {
         }
         // ink bounds within the composed grid: the grid carries the
         // model's canvas padding, and advancing by the padded width
-        // spreads words far apart (the em-scale gap bug)
+        // spreads words far apart
         let (mut ix0, mut ix1, mut iy0, mut iy1) = (usize::MAX, 0usize, usize::MAX, 0usize);
         for y in 0..wf.h {
             for x in 0..wf.w {
@@ -146,70 +210,112 @@ fn shape_field(f: &FieldFont, text: &str) -> String {
         }
         // place word: right edge of its INK at pen_right
         let dx = pen_right - (wf.x0 + ix1 as f64 + 1.0);
-        let path = field_text::trace_field_smooth(&wf.grid, wf.w, wf.h);
-        let path = kurbo::Affine::translate((wf.x0 + dx, wf.y0)) * path;
-        paths.push(path.to_svg());
         y_min = y_min.min(wf.y0 + iy0 as f64);
         y_max = y_max.max(wf.y0 + iy1 as f64 + 1.0);
-
-        // spans: cluster k covers x from its origin to the previous
-        // cluster's origin (RTL); first cluster reaches the right edge.
-        let cl = &wf.clusters;
-        let mut ci = 0usize; // char offset within word
-        for (k, c) in cl.iter().enumerate() {
-            let right = if k == 0 { pen_right } else { cl[k - 1].ox + dx };
-            let left =
-                if k + 1 < cl.len() { cl[k + 1].ox + dx } else { wf.x0 + ix0 as f64 + dx };
-            let nch = c.letters.chars().count();
-            // one span per source char, splitting the cluster width
-            let cw = (right - left).max(1.0) / nch as f64;
-            for j in 0..nch {
-                spans.push(serde_json::json!({
-                    "i": char_base + ci + j,
-                    "x": right - (j as f64 + 1.0) * cw,
-                    "w": cw,
-                }));
-            }
-            let _ = left;
-            ci += nch;
-        }
         pen_right -= (ix1 - ix0 + 1) as f64 + space;
-        char_base += n_chars + 1; // + the following space
+        words.push(PlacedWord { wf, dx, char_base, n_chars, ix0, ix1 });
+        char_base += n_chars + 1;
     }
     let width = -pen_right - space.min(-pen_right);
-    // shift everything right so the line starts at x = 0
-    let shift = width;
-    let paths: Vec<String> = paths
-        .iter()
-        .map(|p| p.clone())
-        .collect();
-    // note: paths are in pen coordinates (negative x); the client
-    // receives a combined path already shifted.
-    let mut combined = String::new();
-    for p in &paths {
-        combined.push_str(p);
-        combined.push(' ');
+    FieldLine {
+        words,
+        width,
+        y_min,
+        y_max,
+        space,
+        total_chars: text.chars().count(),
     }
-    let spans: Vec<serde_json::Value> = spans
+}
+
+fn shape_field(f: &FieldFont, text: &str) -> String {
+    let line = build_field_line(f, text);
+    let shift = line.width;
+    let y_min = line.y_min;
+    let baseline_y = -y_min;
+    let mut combined = String::new();
+    let mut spans: Vec<serde_json::Value> = Vec::new();
+    let n = line.total_chars;
+    let mut nodes: Vec<(f64, f64)> = vec![(f64::NAN, f64::NAN); n + 1];
+
+    for pw in &line.words {
+        let wf = &pw.wf;
+        let path = field_text::trace_field_smooth(&wf.grid, wf.w, wf.h);
+        let path = kurbo::Affine::translate((wf.x0 + pw.dx + shift, wf.y0 - y_min)) * path;
+        combined.push_str(&path.to_svg());
+        combined.push(' ');
+
+        let pen_right_word = pw.dx + wf.x0 + pw.ix1 as f64 + 1.0 + shift;
+        let left_ink = wf.x0 + pw.ix0 as f64 + pw.dx + shift;
+        let cl = &wf.clusters;
+        let mut ci = 0usize;
+        for (k, c) in cl.iter().enumerate() {
+            let right = if k == 0 { pen_right_word } else { cl[k - 1].ox + pw.dx + shift };
+            let left = if k + 1 < cl.len() { cl[k + 1].ox + pw.dx + shift } else { left_ink };
+            let nch = c.letters.chars().count();
+            let cw_ = (right - left).max(1.0) / nch as f64;
+            let ox = c.ox + pw.dx + shift;
+            let oy = c.oy - y_min;
+            for j in 0..nch {
+                let i = pw.char_base + ci + j;
+                spans.push(serde_json::json!({
+                    "i": i,
+                    "x": right - (j as f64 + 1.0) * cw_,
+                    "w": cw_,
+                }));
+                if i <= n {
+                    // caret nodes: the cluster origin, with intra-
+                    // cluster indices spread toward the left edge
+                    let t = j as f64 / nch as f64;
+                    nodes[i] = (ox + (left - ox) * t, oy);
+                }
+            }
+            ci += nch;
+        }
+        // end-of-word caret: just past the left ink edge, easing
+        // toward the baseline
+        let end_i = pw.char_base + pw.n_chars;
+        if end_i <= n {
+            let ly = cl.last().map(|c| c.oy - y_min).unwrap_or(baseline_y);
+            nodes[end_i] = (left_ink - line.space * 0.5, (ly + baseline_y) * 0.5);
+        }
+    }
+    // fill gaps (leading/trailing spaces, unrendered words):
+    // forward then backward copy of the nearest known node
+    let mut last: Option<(f64, f64)> = None;
+    for p in nodes.iter_mut() {
+        if p.0.is_nan() {
+            if let Some(q) = last {
+                *p = q;
+            }
+        } else {
+            last = Some(*p);
+        }
+    }
+    let mut next: Option<(f64, f64)> = None;
+    for p in nodes.iter_mut().rev() {
+        if p.0.is_nan() {
+            *p = next.unwrap_or((shift, baseline_y));
+        } else {
+            next = Some(*p);
+        }
+    }
+    let nodes_json: Vec<serde_json::Value> = nodes
         .iter()
-        .map(|s| {
-            serde_json::json!({
-                "i": s["i"],
-                "x": s["x"].as_f64().unwrap() + shift,
-                "w": s["w"],
-            })
-        })
+        .enumerate()
+        .map(|(i, p)| serde_json::json!({ "i": i, "x": p.0, "y": p.1 }))
         .collect();
+
     serde_json::json!({
-        "width": width,
-        "grid_h": (y_max - y_min).ceil(),
-        "baseline": (-y_min).round(),
+        "width": line.width,
+        "grid_h": (line.y_max - line.y_min).ceil(),
+        "baseline": baseline_y.round(),
         "rtl": true,
-        "path": translate_svg(&combined, shift, -y_min),
+        "path": combined,
         "glyphs": [],
         "spans": spans,
+        "nodes": nodes_json,
         "field": true,
-        "em_px": em,
+        "em_px": f.canvas.em_px,
     })
     .to_string()
 }

@@ -246,8 +246,32 @@ fn main() -> candle_core::Result<()> {
 
     // Deterministic split: every 20th row is validation.
     let val_idx: Vec<usize> = (0..n).filter(|i| i % 20 == 0).collect();
-    let train_idx: Vec<usize> = (0..n).filter(|i| i % 20 != 0).collect();
+    let mut train_idx: Vec<usize> = (0..n).filter(|i| i % 20 != 0).collect();
     println!("rows: {} train, {} val", train_idx.len(), val_idx.len());
+
+    // Oversample the long-word rows. A context window that spans
+    // four or more letters cannot come from the combinatorial corpus
+    // (singles, pairs, triples), so these rows belong to the
+    // real-word extension (basmala, surahs), and they are a sliver
+    // of the gradient. NTF_OVERSAMPLE=K repeats them K times per
+    // epoch; the validation split is untouched.
+    let os: usize =
+        std::env::var("NTF_OVERSAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    if os > 1 {
+        let lig = ds.vocab.iter().position(|s| s == "\u{644}\u{644}\u{647}").map(|i| i as u32);
+        let long: Vec<usize> = train_idx
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let f = ds.feats[i];
+                (f[0] != 0 && f[3] != 0) || (f[1] != 0 && f[4] != 0) || Some(f[2]) == lig
+            })
+            .collect();
+        println!("oversampling {} long-word rows x{os}", long.len());
+        for _ in 1..os {
+            train_idx.extend_from_slice(&long);
+        }
+    }
 
     // Persist the vocabulary up front so mid-training checkpoints can
     // be exported.

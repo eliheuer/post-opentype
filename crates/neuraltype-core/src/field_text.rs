@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 /// One laid-out cluster: its feature tuple and its origin in pixels
 /// (y-down, baseline at y = 0).
+#[derive(Clone)]
 pub struct Cluster {
     pub letters: String,
     pub feats: [u32; 5],
@@ -100,6 +101,18 @@ pub struct WordField {
 
 pub fn compose_word(font: &FieldFont, word: &str) -> WordField {
     let clusters = layout_word(font, word);
+    compose_clusters(font, clusters, None)
+}
+
+/// Compose a word's clusters into one field. `mask` selects a subset
+/// by cluster index (None = all). The grid and its placement cover
+/// only the included clusters; `clusters` keeps the full list.
+pub fn compose_clusters(
+    font: &FieldFont,
+    clusters: Vec<Cluster>,
+    mask: Option<&[bool]>,
+) -> WordField {
+    let included = |k: usize| mask.map_or(true, |m| m.get(k).copied().unwrap_or(false));
     let (cw, ch) = (font.canvas.w as f64, font.canvas.h as f64);
     let (cox, coy) = (font.canvas.origin_x, font.canvas.origin_y);
     // extents
@@ -107,19 +120,27 @@ pub fn compose_word(font: &FieldFont, word: &str) -> WordField {
     let mut y0 = f64::MAX;
     let mut x1 = f64::MIN;
     let mut y1 = f64::MIN;
-    for c in &clusters {
+    let mut n_inc = 0usize;
+    for (k, c) in clusters.iter().enumerate() {
+        if !included(k) {
+            continue;
+        }
+        n_inc += 1;
         x0 = x0.min(c.ox - cox);
         y0 = y0.min(c.oy - coy);
         x1 = x1.max(c.ox - cox + cw);
         y1 = y1.max(c.oy - coy + ch);
     }
-    if clusters.is_empty() {
+    if n_inc == 0 {
         return WordField { grid: vec![], w: 0, h: 0, x0: 0.0, y0: 0.0, clusters };
     }
     let w = (x1 - x0).ceil() as usize + 1;
     let h = (y1 - y0).ceil() as usize + 1;
     let mut grid = vec![-1.0f32; w * h];
-    for c in &clusters {
+    for (k, c) in clusters.iter().enumerate() {
+        if !included(k) {
+            continue;
+        }
         let g = font.glyph(c.feats);
         let bx = (c.ox - cox - x0).round() as i64;
         let by = (c.oy - coy - y0).round() as i64;
