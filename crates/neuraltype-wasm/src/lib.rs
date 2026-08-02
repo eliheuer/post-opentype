@@ -177,6 +177,10 @@ struct PlacedWord {
     /// end-of-word caret node sits here, on the tail of the last
     /// letter instead of floating mid-air.
     exit_y: f64,
+    /// Chain-space y of the word's ink at its right (entry) edge:
+    /// the before-the-word caret node sits here, on the first
+    /// letter's entry stroke.
+    entry_y: f64,
 }
 
 struct FieldLine {
@@ -260,6 +264,17 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
             }
         }
         let exit_y = base_wf.y0 + if yn > 0 { ysum / yn as f64 } else { 0.0 };
+        let mut ysum_r = 0.0f64;
+        let mut yn_r = 0usize;
+        for y in 0..base_wf.h {
+            for x in bx1.saturating_sub(3)..=bx1 {
+                if base_wf.grid[y * base_wf.w + x] >= 0.0 {
+                    ysum_r += y as f64;
+                    yn_r += 1;
+                }
+            }
+        }
+        let entry_y = base_wf.y0 + if yn_r > 0 { ysum_r / yn_r as f64 } else { 0.0 };
         let wf = if has_off {
             let mut moved = clusters;
             let mut cum = (0.0f64, 0.0f64);
@@ -289,7 +304,16 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
             y_max = y_max.max(wf.y0 + ry1 as f64 + 1.0);
         }
         pen_right -= (ink_r - ink_l) + space;
-        words.push(PlacedWord { wf, dx, char_base, n_chars, ink_l, ink_r, exit_y });
+        words.push(PlacedWord {
+            wf,
+            dx,
+            char_base,
+            n_chars,
+            ink_l,
+            ink_r,
+            exit_y,
+            entry_y,
+        });
         char_base += n_chars + 1;
     }
     let width = -pen_right - space.min(-pen_right);
@@ -339,7 +363,13 @@ fn shape_field(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> String {
                     "w": cw_,
                 }));
                 if i <= n {
-                    if nch == 1 {
+                    if k == 0 && j == 0 {
+                        // the before-the-word slot: on the first
+                        // letter's ink entry, not the abstract pen
+                        // origin
+                        nodes[i] =
+                            (pw.ink_r + pw.dx + shift + line.space * 0.25, pw.entry_y - y_min);
+                    } else if nch == 1 {
                         // the chain origin itself
                         nodes[i] = (ox, oy);
                     } else {
