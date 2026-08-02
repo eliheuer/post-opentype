@@ -344,6 +344,45 @@ fn shape_field(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> String {
         combined.push_str(&path.to_svg());
         combined.push(' ');
 
+        // visual join point between two clusters: the deepest cell of
+        // their fields' intersection -- the middle of the connecting
+        // stroke, which is where an insertion visually breaks the
+        // word. None when the letters do not touch.
+        let join_point = |ka: &field_text::Cluster,
+                          kb: &field_text::Cluster|
+         -> Option<(f64, f64)> {
+            let (cw_i, ch_i) = (f.canvas.w as i64, f.canvas.h as i64);
+            let (cox, coy) = (f.canvas.origin_x, f.canvas.origin_y);
+            let ga = f.glyph(ka.feats);
+            let gb = f.glyph(kb.feats);
+            let ax0 = (ka.ox - cox).round() as i64;
+            let ay0 = (ka.oy - coy).round() as i64;
+            let bx0 = (kb.ox - cox).round() as i64;
+            let by0 = (kb.oy - coy).round() as i64;
+            let x0 = ax0.max(bx0);
+            let y0 = ay0.max(by0);
+            let x1 = (ax0 + cw_i).min(bx0 + cw_i);
+            let y1 = (ay0 + ch_i).min(by0 + ch_i);
+            let mut best = f32::MIN;
+            let mut bp = None;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let va = ga.field[((y - ay0) * cw_i + (x - ax0)) as usize];
+                    let vb = gb.field[((y - by0) * cw_i + (x - bx0)) as usize];
+                    let m = va.min(vb);
+                    if m > best {
+                        best = m;
+                        bp = Some((x as f64 + 0.5, y as f64 + 0.5));
+                    }
+                }
+            }
+            if best >= 0.0 {
+                bp
+            } else {
+                None
+            }
+        };
+
         let pen_right_word = pw.dx + pw.ink_r + shift;
         let left_ink = pw.ink_l + pw.dx + shift;
         let cl = &wf.clusters;
@@ -370,8 +409,14 @@ fn shape_field(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> String {
                         nodes[i] =
                             (pw.ink_r + pw.dx + shift + line.space * 0.25, pw.entry_y - y_min);
                     } else if nch == 1 {
-                        // the chain origin itself
-                        nodes[i] = (ox, oy);
+                        // interior break: the visual junction where
+                        // this letter's ink meets the previous
+                        // letter's ink; chain origin when they do
+                        // not touch
+                        nodes[i] = match join_point(&cl[k - 1], c) {
+                            Some((jx, jy)) => (jx + pw.dx + shift, jy - y_min),
+                            None => (ox, oy),
+                        };
                     } else {
                         // ligatures: one node per character cell,
                         // spread across the cluster's visual span --
