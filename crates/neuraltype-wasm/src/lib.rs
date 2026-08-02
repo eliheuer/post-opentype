@@ -173,6 +173,10 @@ struct PlacedWord {
     /// Ink edges in chain coordinates, measured before drag offsets.
     ink_l: f64,
     ink_r: f64,
+    /// Chain-space y of the word's ink at its left (exit) edge: the
+    /// end-of-word caret node sits here, on the tail of the last
+    /// letter instead of floating mid-air.
+    exit_y: f64,
 }
 
 struct FieldLine {
@@ -244,6 +248,18 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
         // ink edges in chain coordinates, from the unoffset word
         let ink_r = base_wf.x0 + bx1 as f64 + 1.0;
         let ink_l = base_wf.x0 + bx0 as f64;
+        // ink exit height: centroid of the leftmost few ink columns
+        let mut ysum = 0.0f64;
+        let mut yn = 0usize;
+        for y in 0..base_wf.h {
+            for x in bx0..(bx0 + 4).min(base_wf.w) {
+                if base_wf.grid[y * base_wf.w + x] >= 0.0 {
+                    ysum += y as f64;
+                    yn += 1;
+                }
+            }
+        }
+        let exit_y = base_wf.y0 + if yn > 0 { ysum / yn as f64 } else { 0.0 };
         let wf = if has_off {
             let mut moved = clusters;
             let mut cum = (0.0f64, 0.0f64);
@@ -273,7 +289,7 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
             y_max = y_max.max(wf.y0 + ry1 as f64 + 1.0);
         }
         pen_right -= (ink_r - ink_l) + space;
-        words.push(PlacedWord { wf, dx, char_base, n_chars, ink_l, ink_r });
+        words.push(PlacedWord { wf, dx, char_base, n_chars, ink_l, ink_r, exit_y });
         char_base += n_chars + 1;
     }
     let width = -pen_right - space.min(-pen_right);
@@ -338,12 +354,11 @@ fn shape_field(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> String {
             }
             ci += nch;
         }
-        // end-of-word caret: just past the left ink edge, easing
-        // toward the baseline
+        // end-of-word caret: just past the left ink edge, at the
+        // height where the word's ink actually exits
         let end_i = pw.char_base + pw.n_chars;
         if end_i <= n {
-            let ly = cl.last().map(|c| c.oy - y_min).unwrap_or(baseline_y);
-            nodes[end_i] = (left_ink - line.space * 0.5, (ly + baseline_y) * 0.5);
+            nodes[end_i] = (left_ink - line.space * 0.5, pw.exit_y - y_min);
         }
     }
     // fill gaps (leading/trailing spaces, unrendered words):
