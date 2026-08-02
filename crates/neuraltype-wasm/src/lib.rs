@@ -14,6 +14,10 @@ enum Font {
 #[wasm_bindgen]
 pub struct NtfFont {
     inner: Font,
+    /// Per-caret-index placement overrides (field px, y-down): a
+    /// dragged node edits the displacement chain, and everything
+    /// after it follows. Cleared when the text changes.
+    node_offsets: std::cell::RefCell<std::collections::HashMap<usize, (f64, f64)>>,
 }
 
 #[wasm_bindgen]
@@ -23,11 +27,11 @@ impl NtfFont {
     pub fn new(bytes: &[u8]) -> Result<NtfFont, JsError> {
         if neuraltype_core::field_model::is_field_font(bytes) {
             return FieldFont::load(bytes)
-                .map(|f| NtfFont { inner: Font::Field(f) })
+                .map(|f| NtfFont { inner: Font::Field(f), node_offsets: Default::default() })
                 .map_err(|e| JsError::new(&e));
         }
         font::load(bytes)
-            .map(|f| NtfFont { inner: Font::Kufic(f) })
+            .map(|f| NtfFont { inner: Font::Kufic(f), node_offsets: Default::default() })
             .map_err(|e| JsError::new(&e))
     }
 
@@ -36,9 +40,19 @@ impl NtfFont {
     /// `path` is ONE SVG path for the whole line (connected letters
     /// are one continuous contour) in grid units (y-down), and
     /// `glyphs` is cluster metadata [{ch, form, x, advance}].
+    /// Set the total placement offset for the cluster at caret index
+    /// `i` (field px, y-down). Dragging a node calls this.
+    pub fn set_node_offset(&self, i: usize, dx: f64, dy: f64) {
+        self.node_offsets.borrow_mut().insert(i, (dx, dy));
+    }
+
+    pub fn clear_node_offsets(&self) {
+        self.node_offsets.borrow_mut().clear();
+    }
+
     pub fn shape(&self, text: &str, elong: f64, dir: &str) -> String {
         let inner = match &self.inner {
-            Font::Field(f) => return shape_field(f, text),
+            Font::Field(f) => return shape_field(f, text, &self.node_offsets.borrow()),
             Font::Kufic(f) => f,
         };
         let dir = match dir {
@@ -100,7 +114,7 @@ impl NtfFont {
         if end <= start {
             return String::new();
         }
-        let line = build_field_line(f, text);
+        let line = build_field_line(f, text, &self.node_offsets.borrow());
         let shift = line.width;
         let mut combined = String::new();
         for pw in &line.words {
@@ -156,8 +170,9 @@ struct PlacedWord {
     dx: f64,
     char_base: usize,
     n_chars: usize,
-    ix0: usize,
-    ix1: usize,
+    /// Ink edges in chain coordinates, measured before drag offsets.
+    ink_l: f64,
+    ink_r: f64,
 }
 
 struct FieldLine {
@@ -169,7 +184,9 @@ struct FieldLine {
     total_chars: usize,
 }
 
-fn build_field_line(f: &FieldFont, text: &str) -> FieldLine {
+type NodeOffsets = std::collections::HashMap<usize, (f64, f64)>;
+
+fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLine {
     let em = f.canvas.em_px;
     // Gulzar's own space glyph advances 0.12 em (hmtx); match it.
     let space = 0.12 * em;
@@ -185,35 +202,78 @@ fn build_field_line(f: &FieldFont, text: &str) -> FieldLine {
             char_base += 1;
             continue;
         }
-        let wf = field_text::compose_word(f, word);
+        // layout, then apply dragged-node offsets cumulatively: an
+        // offset at cluster k moves k and every cluster after it,
+        // because the chain is relative. Placement anchors on the
+        // UNOFFSET ink, so a drag moves letters on screen instead of
+        // being cancelled by the pen re-anchoring.
+        let clusters = field_text::layout_word(f, word);
+        let mut ci = 0usize;
+        let mut has_off = false;
+        for c in &clusters {
+            if offsets.contains_key(&(char_base + ci)) {
+                has_off = true;
+            }
+            ci += c.letters.chars().count();
+        }
+        let base_wf = field_text::compose_clusters(f, clusters.clone(), None);
+        if base_wf.w == 0 {
+            char_base += n_chars + 1;
+            continue;
+        }
+        let ink = |wf: &field_text::WordField| {
+            let (mut ix0, mut ix1, mut iy0, mut iy1) =
+                (usize::MAX, 0usize, usize::MAX, 0usize);
+            for y in 0..wf.h {
+                for x in 0..wf.w {
+                    if wf.grid[y * wf.w + x] >= 0.0 {
+                        ix0 = ix0.min(x);
+                        ix1 = ix1.max(x);
+                        iy0 = iy0.min(y);
+                        iy1 = iy1.max(y);
+                    }
+                }
+            }
+            (ix0, ix1, iy0, iy1)
+        };
+        let (bx0, bx1, _, _) = ink(&base_wf);
+        if bx0 == usize::MAX {
+            char_base += n_chars + 1;
+            continue;
+        }
+        // ink edges in chain coordinates, from the unoffset word
+        let ink_r = base_wf.x0 + bx1 as f64 + 1.0;
+        let ink_l = base_wf.x0 + bx0 as f64;
+        let wf = if has_off {
+            let mut moved = clusters;
+            let mut cum = (0.0f64, 0.0f64);
+            let mut ci = 0usize;
+            for c in moved.iter_mut() {
+                if let Some(&(dx, dy)) = offsets.get(&(char_base + ci)) {
+                    cum.0 += dx;
+                    cum.1 += dy;
+                }
+                c.ox += cum.0;
+                c.oy += cum.1;
+                ci += c.letters.chars().count();
+            }
+            field_text::compose_clusters(f, moved, None)
+        } else {
+            base_wf
+        };
         if wf.w == 0 {
             char_base += n_chars + 1;
             continue;
         }
-        // ink bounds within the composed grid: the grid carries the
-        // model's canvas padding, and advancing by the padded width
-        // spreads words far apart
-        let (mut ix0, mut ix1, mut iy0, mut iy1) = (usize::MAX, 0usize, usize::MAX, 0usize);
-        for y in 0..wf.h {
-            for x in 0..wf.w {
-                if wf.grid[y * wf.w + x] >= 0.0 {
-                    ix0 = ix0.min(x);
-                    ix1 = ix1.max(x);
-                    iy0 = iy0.min(y);
-                    iy1 = iy1.max(y);
-                }
-            }
+        let (_, _, ry0, ry1) = ink(&wf);
+        // place word: right edge of its unoffset INK at pen_right
+        let dx = pen_right - ink_r;
+        if ry0 != usize::MAX {
+            y_min = y_min.min(wf.y0 + ry0 as f64);
+            y_max = y_max.max(wf.y0 + ry1 as f64 + 1.0);
         }
-        if ix0 == usize::MAX {
-            char_base += n_chars + 1;
-            continue;
-        }
-        // place word: right edge of its INK at pen_right
-        let dx = pen_right - (wf.x0 + ix1 as f64 + 1.0);
-        y_min = y_min.min(wf.y0 + iy0 as f64);
-        y_max = y_max.max(wf.y0 + iy1 as f64 + 1.0);
-        pen_right -= (ix1 - ix0 + 1) as f64 + space;
-        words.push(PlacedWord { wf, dx, char_base, n_chars, ix0, ix1 });
+        pen_right -= (ink_r - ink_l) + space;
+        words.push(PlacedWord { wf, dx, char_base, n_chars, ink_l, ink_r });
         char_base += n_chars + 1;
     }
     let width = -pen_right - space.min(-pen_right);
@@ -227,8 +287,8 @@ fn build_field_line(f: &FieldFont, text: &str) -> FieldLine {
     }
 }
 
-fn shape_field(f: &FieldFont, text: &str) -> String {
-    let line = build_field_line(f, text);
+fn shape_field(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> String {
+    let line = build_field_line(f, text, offsets);
     let shift = line.width;
     let y_min = line.y_min;
     let baseline_y = -y_min;
@@ -244,8 +304,8 @@ fn shape_field(f: &FieldFont, text: &str) -> String {
         combined.push_str(&path.to_svg());
         combined.push(' ');
 
-        let pen_right_word = pw.dx + wf.x0 + pw.ix1 as f64 + 1.0 + shift;
-        let left_ink = wf.x0 + pw.ix0 as f64 + pw.dx + shift;
+        let pen_right_word = pw.dx + pw.ink_r + shift;
+        let left_ink = pw.ink_l + pw.dx + shift;
         let cl = &wf.clusters;
         let mut ci = 0usize;
         for (k, c) in cl.iter().enumerate() {
