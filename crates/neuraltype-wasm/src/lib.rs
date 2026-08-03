@@ -63,6 +63,29 @@ impl NtfFont {
         self.node_offsets.borrow_mut().clear();
     }
 
+    /// Trace one word with the img2bez quality fitter and cache the
+    /// outline. Returns true when a new outline was produced (the
+    /// caller should re-shape and redraw). Called asynchronously by
+    /// the editor after typing pauses; shape() itself never blocks
+    /// on img2bez.
+    pub fn refine_word(&self, word: &str) -> bool {
+        let f = match &self.inner {
+            Font::Field(f) => f,
+            _ => return false,
+        };
+        if word.is_empty() || self.word_traces.borrow().contains_key(word) {
+            return false;
+        }
+        let wf = field_text::compose_word(f, word);
+        match trace_word_i2b(f, &wf) {
+            Some(p) => {
+                self.word_traces.borrow_mut().insert(word.to_string(), p);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn shape(&self, text: &str, elong: f64, dir: &str) -> String {
         let inner = match &self.inner {
             Font::Field(f) => {
@@ -371,16 +394,12 @@ fn trace_word_i2b(f: &FieldFont, wf: &field_text::WordField) -> Option<kurbo::Be
             gray[y * uw + x] = (((d / 1.2) + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
         }
     }
-    let mut png_bytes: Vec<u8> = Vec::new();
-    image::GrayImage::from_raw(uw as u32, uh as u32, gray)?
-        .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-        .ok()?;
     let mut opts = img2bez::TraceOptions::default();
     opts.rtl_start = true;
     // all-curves smooth mode: tangent-continuous outlines, no hard
     // corners -- the right register for nastaliq
     opts.mode = img2bez::TraceMode::Smooth;
-    let outline = img2bez::trace(&png_bytes, &opts).ok()?;
+    let outline = img2bez::trace_gray(uw as u32, uh as u32, gray, &opts).ok()?;
     let path = kurbo::BezPath::from_svg(&outline.to_svg_path()).ok()?;
     // unit space (y-up, image height = em_height) -> field px (y-down)
     let k = uh as f64 / (opts.em_height * s as f64);
@@ -415,16 +434,12 @@ fn shape_field(
         let word_has_offsets = (pw.char_base..pw.char_base + pw.n_chars)
             .any(|i| offsets.contains_key(&i));
         let cached = traces.borrow().get(&word_str).cloned();
-        let path = if word_has_offsets {
-            // live drag: fast tracer, no cache
-            field_text::trace_field_smooth(&wf.grid, wf.w, wf.h)
-        } else if let Some(p) = cached {
-            p
-        } else {
-            let p = trace_word_i2b(f, wf)
-                .unwrap_or_else(|| field_text::trace_field_smooth(&wf.grid, wf.w, wf.h));
-            traces.borrow_mut().insert(word_str.clone(), p.clone());
-            p
+        // never trace img2bez inside shape(): typing stays instant on
+        // the fast tracer, and refine_word() upgrades words to the
+        // img2bez outline asynchronously
+        let path = match (word_has_offsets, cached) {
+            (false, Some(p)) => p,
+            _ => field_text::trace_field_smooth(&wf.grid, wf.w, wf.h),
         };
         let path = kurbo::Affine::translate((wf.x0 + pw.dx + shift, wf.y0 - y_min)) * path;
         combined.push_str(&path.to_svg());

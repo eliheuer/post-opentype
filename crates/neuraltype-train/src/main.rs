@@ -332,7 +332,9 @@ fn main() -> candle_core::Result<()> {
         )
     };
 
-    const BS: usize = 128;
+    let bs: usize =
+        std::env::var("NTF_bs").ok().and_then(|v| v.parse().ok()).unwrap_or(128);
+    println!("batch size: {bs}");
     let mut order: Vec<usize> = train_idx.clone();
     let mut rng_state = 0x9e3779b97f4a7c15u64;
     let mut shuffle = |v: &mut Vec<usize>| {
@@ -349,7 +351,7 @@ fn main() -> candle_core::Result<()> {
         let mut loss_sum = 0.0f64;
         let mut nb = 0usize;
         let t0 = std::time::Instant::now();
-        for chunk in order.chunks(BS) {
+        for chunk in order.chunks(bs) {
             let feats = feats_of(chunk)?;
             let target = targets_of(chunk)?;
             let (dtgt, dmask) = disp_of(chunk);
@@ -365,7 +367,7 @@ fn main() -> candle_core::Result<()> {
         let mut vmse = 0.0f64;
         let mut inter = 0.0f64;
         let mut union = 0.0f64;
-        for chunk in val_idx.chunks(BS) {
+        for chunk in val_idx.chunks(bs) {
             let feats = feats_of(chunk)?;
             let target = targets_of(chunk)?;
             let (pred, _) = model.forward(&feats)?;
