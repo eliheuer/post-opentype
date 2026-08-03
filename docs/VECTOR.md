@@ -54,13 +54,27 @@ holds.
   Vectors-to-field is the cheap direction (rasterize + exact EDT on
   demand), so the strand system survives unchanged.
 
-## Sequencing
+## Sequencing: two tracks in parallel
 
-1. After the 96 px/em run ships: tokenize the Gulzar cluster
-   outlines (quantized coords; reuse the Virtua vocabulary design).
-2. Prototype the decoder on the kiln; evaluate with the same
-   compare gates (teacher sheets, basmala, IoU after rasterizing).
-3. Compare the three columns honestly: field-64, field-96,
-   vector-v2 — fidelity, file size, inference speed per keystroke.
-4. If vector wins, it becomes "neuraltype-vector-v2" in the spec and
-   the blog gets its third post.
+Decision (2026-08-03): do not pick a direction. The field track and
+the vector track train in parallel and race inside one harness. The
+.ntf container makes this cheap: the header's `format` field already
+dispatches per-file in the engine, so a "neuraltype-vector-v1" font
+loads in the same demo, drives the same strand UI, and passes the
+same gates as the field fonts.
+
+1. Field track: the 96 px/em run and its fine-tune legs continue on
+   the kiln, unchanged.
+2. Vector track, build order:
+   a. Tokenizer: Gulzar cluster outlines from
+      data/extract-gulzar/glyphs.jsonl into quantized command
+      sequences (reuse the Virtua vocabulary design).
+   b. Trainer: a small candle transformer next to the field trainer.
+      Virtua-scale models train in hours on the Mac or the kiln.
+   c. Engine: a "neuraltype-vector-v1" loader arm in the wasm
+      dispatch; selection clouds come from rasterize + exact EDT.
+3. One comparison table, same gates for every column: field-64,
+   field-96, vector-v1 — fidelity (teacher sheets, basmala), file
+   size, inference speed per keystroke.
+4. The winner earns the spec name and the blog's third post; the
+   loser still informs the shared-prior work in COMPRESSION.md.
