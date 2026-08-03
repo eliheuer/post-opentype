@@ -6,6 +6,7 @@ members = [
     "crates/neuraltype-wasm",
     "crates/neuraltype-distill",
     "crates/neuraltype-train",
+    "crates/ntf-dash",
 ]
 
 [workspace.package]
@@ -21,3 +22,10 @@ serde_json = "1"
 [profile.release]
 opt-level = "s"
 lto = true
+
+# candle-kernels 0.9.2 ships MoE kernels using bf16 WMMA, which only
+# compiles for sm_80+. The training box is a Turing card (sm_75), so
+# we vendor the crate with those kernels arch-guarded. This project
+# never calls the MoE ops.
+[patch.crates-io]
+candle-kernels = { path = "vendor/candle-kernels" }
