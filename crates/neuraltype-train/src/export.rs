@@ -54,6 +54,8 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
     }
 
     let header = serde_json::json!({
+        "license": "OFL-1.1",
+        "notice": "Derived from Gulzar (Copyright 2021 The Gulzar Project Authors, https://github.com/simoncozens/Gulzar), licensed under the SIL Open Font License 1.1.",
         "format": "neuraltype-field-v1",
         "script": "arabic",
         "style": style,
