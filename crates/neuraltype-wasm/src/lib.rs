@@ -63,6 +63,39 @@ impl NtfFont {
         self.node_offsets.borrow_mut().clear();
     }
 
+    /// Trace one word with the img2bez fitter and return the outline
+    /// as an SVG path in word-grid coordinates, without caching.
+    /// Workers call this off the main thread.
+    pub fn trace_word_svg(&self, word: &str) -> String {
+        let f = match &self.inner {
+            Font::Field(f) => f,
+            _ => return String::new(),
+        };
+        if word.is_empty() {
+            return String::new();
+        }
+        let wf = field_text::compose_word(f, word);
+        trace_word_i2b(f, &wf).map(|p| p.to_svg()).unwrap_or_default()
+    }
+
+    /// Install a worker-traced outline into the word cache. Returns
+    /// true when the cache changed (the caller should re-shape).
+    pub fn insert_word_trace(&self, word: &str, svg: &str) -> bool {
+        if word.is_empty() || svg.trim().is_empty() {
+            return false;
+        }
+        if self.word_traces.borrow().contains_key(word) {
+            return false;
+        }
+        match kurbo::BezPath::from_svg(svg) {
+            Ok(p) => {
+                self.word_traces.borrow_mut().insert(word.to_string(), p);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Trace one word with the img2bez quality fitter and cache the
     /// outline. Returns true when a new outline was produced (the
     /// caller should re-shape and redraw). Called asynchronously by
@@ -374,7 +407,7 @@ fn trace_word_i2b(f: &FieldFont, wf: &field_text::WordField) -> Option<kurbo::Be
         return None;
     }
     let spread = f.canvas.spread_px;
-    let s = ((768.0 / wf.h as f64).ceil() as usize).clamp(3, 10);
+    let s = ((640.0 / wf.h as f64).ceil() as usize).clamp(3, 8);
     let (uw, uh) = (wf.w * s, wf.h * s);
     let mut gray = vec![0u8; uw * uh];
     for y in 0..uh {
