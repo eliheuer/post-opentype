@@ -94,12 +94,18 @@ def main():
     tok = {t: i for i, t in enumerate(vocab)}
 
     def emit_delta(out, bins, stats):
-        """One axis delta in bins -> one or more chained tokens."""
+        """One axis delta in bins -> chained tokens, uniquely
+        decodable: a token of |DMAX| always continues; a token below
+        |DMAX| ends the coordinate. An exact-|DMAX| remainder emits
+        d0 as terminator."""
         while True:
             step = max(-DMAX, min(DMAX, bins))
             out.append(tok[f"d{step}"])
             bins -= step
+            if abs(step) < DMAX:
+                return
             if bins == 0:
+                out.append(tok["d0"])
                 return
             stats["chained"] += 1
 

@@ -15,6 +15,10 @@ safetensors = "0.8.0"
 serde.workspace = true
 serde_json.workspace = true
 
+[[bin]]
+name = "ntf-train-vec"
+path = "src/bin/vec.rs"
+
 [features]
 default = []
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate"]
