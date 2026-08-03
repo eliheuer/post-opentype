@@ -12,3 +12,6 @@ neuraltype-core = { path = "../neuraltype-core" }
 kurbo.workspace = true
 wasm-bindgen = "0.2"
 serde_json.workspace = true
+img2bez = { path = "../../../img2bez", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+console_error_panic_hook = "0.1"

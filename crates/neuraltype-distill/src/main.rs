@@ -98,6 +98,11 @@ fn main() {
             args.get(4).and_then(|s| s.parse().ok()).unwrap_or(2),
             args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0.8),
         ),
+        Some("renderword2") => renderword2(
+            args.get(1).expect("usage: distill renderword2 <font.ntf> <word> <out.rgba>"),
+            args.get(2).expect("word"),
+            args.get(3).expect("out path"),
+        ),
         Some("cascade") => cascade::cascade(
             args.get(1).expect("usage: distill cascade <font.ttf> <word> <out.rgba>"),
             args.get(2).expect("word"),
@@ -141,6 +146,62 @@ fn renderword(ntf: &str, word: &str, out: &str, upsample: usize, accuracy: f64) 
     }
     std::fs::write(out, &rgba).unwrap();
     println!("{w} {h}");
+}
+
+/// Render one word through the img2bez quality tracer: upsample the
+/// composed SDF to ~1024 px with true anti-aliasing (the field IS the
+/// coverage ramp), trace with img2bez's type-quality curve fitting,
+/// rasterize the fitted outline. Writes RGBA, prints "W H".
+fn renderword2(ntf: &str, word: &str, out: &str) {
+    use neuraltype_core::{field_model::FieldFont, field_text};
+    let font = FieldFont::load(&std::fs::read(ntf).expect("ntf")).expect("field font");
+    let wf = field_text::compose_word(&font, word);
+    let spread = font.canvas.spread_px;
+    // upsample so the tall side is ~1024 px
+    let s = ((1024.0 / wf.h as f64).ceil() as usize).clamp(4, 16);
+    let (uw, uh) = (wf.w * s, wf.h * s);
+    let mut gray = vec![0u8; uw * uh];
+    for y in 0..uh {
+        let fy = ((y as f32 + 0.5) / s as f32 - 0.5).max(0.0);
+        let y0 = (fy.floor() as usize).min(wf.h - 1);
+        let y1 = (y0 + 1).min(wf.h - 1);
+        let ty = (fy - y0 as f32).clamp(0.0, 1.0);
+        for x in 0..uw {
+            let fx = ((x as f32 + 0.5) / s as f32 - 0.5).max(0.0);
+            let x0 = (fx.floor() as usize).min(wf.w - 1);
+            let x1 = (x0 + 1).min(wf.w - 1);
+            let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+            let a = wf.grid[y0 * wf.w + x0] * (1.0 - tx) + wf.grid[y0 * wf.w + x1] * tx;
+            let b = wf.grid[y1 * wf.w + x0] * (1.0 - tx) + wf.grid[y1 * wf.w + x1] * tx;
+            let v = (a * (1.0 - ty) + b * ty) as f64;
+            // signed distance in upsampled px -> 1.2 px coverage ramp
+            let d = v * spread * s as f64;
+            let alpha = ((d / 1.2) + 0.5).clamp(0.0, 1.0);
+            gray[y * uw + x] = (alpha * 255.0) as u8;
+        }
+    }
+    let mut png_bytes: Vec<u8> = Vec::new();
+    image::GrayImage::from_raw(uw as u32, uh as u32, gray)
+        .unwrap()
+        .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+        .unwrap();
+    let mut opts = img2bez::TraceOptions::default();
+    opts.rtl_start = true;
+    let outline = img2bez::trace(&png_bytes, &opts).expect("img2bez trace");
+    // outline is y-up, image height mapped to em_height units; cross
+    // the kurbo version boundary through SVG
+    let path = kurbo::BezPath::from_svg(&outline.to_svg_path()).expect("svg parse");
+    let placed: Vec<(kurbo::BezPath, f64, f64)> = vec![(path, 0.0, 0.0)];
+    let scale = uh as f64 / opts.em_height;
+    let grid = fields::rasterize(&placed, uw, uh, scale, 0.0, opts.em_height);
+    let mut rgba = vec![0u8; uw * uh * 4];
+    for (i, &on) in grid.iter().enumerate() {
+        if on {
+            rgba[i * 4..i * 4 + 4].copy_from_slice(&[42, 163, 95, 255]);
+        }
+    }
+    std::fs::write(out, &rgba).unwrap();
+    println!("{uw} {uh}");
 }
 
 fn corpus() -> Vec<String> {

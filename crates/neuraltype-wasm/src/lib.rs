@@ -18,6 +18,10 @@ pub struct NtfFont {
     /// dragged node edits the displacement chain, and everything
     /// after it follows. Cleared when the text changes.
     node_offsets: std::cell::RefCell<std::collections::HashMap<usize, (f64, f64)>>,
+    /// img2bez-traced word outlines, keyed by word text (field px,
+    /// y-down). Words being dragged bypass this and use the fast
+    /// tracer until released.
+    word_traces: std::cell::RefCell<std::collections::HashMap<String, kurbo::BezPath>>,
 }
 
 #[wasm_bindgen]
@@ -25,13 +29,22 @@ impl NtfFont {
     /// Parse a .ntf font (a serialized neural model) from bytes.
     #[wasm_bindgen(constructor)]
     pub fn new(bytes: &[u8]) -> Result<NtfFont, JsError> {
+        console_error_panic_hook::set_once();
         if neuraltype_core::field_model::is_field_font(bytes) {
             return FieldFont::load(bytes)
-                .map(|f| NtfFont { inner: Font::Field(f), node_offsets: Default::default() })
+                .map(|f| NtfFont {
+                    inner: Font::Field(f),
+                    node_offsets: Default::default(),
+                    word_traces: Default::default(),
+                })
                 .map_err(|e| JsError::new(&e));
         }
         font::load(bytes)
-            .map(|f| NtfFont { inner: Font::Kufic(f), node_offsets: Default::default() })
+            .map(|f| NtfFont {
+                inner: Font::Kufic(f),
+                node_offsets: Default::default(),
+                word_traces: Default::default(),
+            })
             .map_err(|e| JsError::new(&e))
     }
 
@@ -52,7 +65,9 @@ impl NtfFont {
 
     pub fn shape(&self, text: &str, elong: f64, dir: &str) -> String {
         let inner = match &self.inner {
-            Font::Field(f) => return shape_field(f, text, &self.node_offsets.borrow()),
+            Font::Field(f) => {
+                return shape_field(f, text, &self.node_offsets.borrow(), &self.word_traces)
+            }
             Font::Kufic(f) => f,
         };
         let dir = match dir {
@@ -327,7 +342,55 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
     }
 }
 
-fn shape_field(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> String {
+/// Trace a composed word with img2bez's type-quality fitter: the SDF
+/// upsampled with a true anti-aliased coverage ramp, traced, and
+/// mapped back to field pixels (y-down). None on any failure -- the
+/// caller falls back to the fast tracer.
+fn trace_word_i2b(f: &FieldFont, wf: &field_text::WordField) -> Option<kurbo::BezPath> {
+    if wf.w == 0 || wf.h == 0 {
+        return None;
+    }
+    let spread = f.canvas.spread_px;
+    let s = ((768.0 / wf.h as f64).ceil() as usize).clamp(3, 10);
+    let (uw, uh) = (wf.w * s, wf.h * s);
+    let mut gray = vec![0u8; uw * uh];
+    for y in 0..uh {
+        let fy = ((y as f32 + 0.5) / s as f32 - 0.5).max(0.0);
+        let y0 = (fy.floor() as usize).min(wf.h - 1);
+        let y1 = (y0 + 1).min(wf.h - 1);
+        let ty = (fy - y0 as f32).clamp(0.0, 1.0);
+        for x in 0..uw {
+            let fx = ((x as f32 + 0.5) / s as f32 - 0.5).max(0.0);
+            let x0 = (fx.floor() as usize).min(wf.w - 1);
+            let x1 = (x0 + 1).min(wf.w - 1);
+            let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+            let a = wf.grid[y0 * wf.w + x0] * (1.0 - tx) + wf.grid[y0 * wf.w + x1] * tx;
+            let b = wf.grid[y1 * wf.w + x0] * (1.0 - tx) + wf.grid[y1 * wf.w + x1] * tx;
+            let v = (a * (1.0 - ty) + b * ty) as f64;
+            let d = v * spread * s as f64;
+            gray[y * uw + x] = (((d / 1.2) + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+        }
+    }
+    let mut png_bytes: Vec<u8> = Vec::new();
+    image::GrayImage::from_raw(uw as u32, uh as u32, gray)?
+        .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+        .ok()?;
+    let mut opts = img2bez::TraceOptions::default();
+    opts.rtl_start = true;
+    let outline = img2bez::trace(&png_bytes, &opts).ok()?;
+    let path = kurbo::BezPath::from_svg(&outline.to_svg_path()).ok()?;
+    // unit space (y-up, image height = em_height) -> field px (y-down)
+    let k = uh as f64 / (opts.em_height * s as f64);
+    let a = kurbo::Affine::new([k, 0.0, 0.0, -k, 0.0, wf.h as f64]);
+    Some(a * path)
+}
+
+fn shape_field(
+    f: &FieldFont,
+    text: &str,
+    offsets: &NodeOffsets,
+    traces: &std::cell::RefCell<std::collections::HashMap<String, kurbo::BezPath>>,
+) -> String {
     let line = build_field_line(f, text, offsets);
     let shift = line.width;
     let y_min = line.y_min;
@@ -337,9 +400,29 @@ fn shape_field(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> String {
     let n = line.total_chars;
     let mut nodes: Vec<(f64, f64)> = vec![(f64::NAN, f64::NAN); n + 1];
 
+    let words_text: Vec<&str> = text.split(' ').collect();
+    let _ = &words_text;
     for pw in &line.words {
         let wf = &pw.wf;
-        let path = field_text::trace_field_smooth(&wf.grid, wf.w, wf.h);
+        let word_str: String = text
+            .chars()
+            .skip(pw.char_base)
+            .take(pw.n_chars)
+            .collect();
+        let word_has_offsets = (pw.char_base..pw.char_base + pw.n_chars)
+            .any(|i| offsets.contains_key(&i));
+        let cached = traces.borrow().get(&word_str).cloned();
+        let path = if word_has_offsets {
+            // live drag: fast tracer, no cache
+            field_text::trace_field_smooth(&wf.grid, wf.w, wf.h)
+        } else if let Some(p) = cached {
+            p
+        } else {
+            let p = trace_word_i2b(f, wf)
+                .unwrap_or_else(|| field_text::trace_field_smooth(&wf.grid, wf.w, wf.h));
+            traces.borrow_mut().insert(word_str.clone(), p.clone());
+            p
+        };
         let path = kurbo::Affine::translate((wf.x0 + pw.dx + shift, wf.y0 - y_min)) * path;
         combined.push_str(&path.to_svg());
         combined.push(' ');
