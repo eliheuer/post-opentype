@@ -152,47 +152,19 @@ fn renderword(ntf: &str, word: &str, out: &str, upsample: usize, accuracy: f64) 
 /// composed SDF to ~1024 px with true anti-aliasing (the field IS the
 /// coverage ramp), trace with img2bez's type-quality curve fitting,
 /// rasterize the fitted outline. Writes RGBA, prints "W H".
+/// Render one word through the img2bez field tracer (trace_sdf: the
+/// SDF sampled lazily, no raster intermediate), rasterized for
+/// inspection. Writes RGBA, prints "W H".
 fn renderword2(ntf: &str, word: &str, out: &str) {
     use neuraltype_core::{field_model::FieldFont, field_text};
     let font = FieldFont::load(&std::fs::read(ntf).expect("ntf")).expect("field font");
     let wf = field_text::compose_word(&font, word);
-    let spread = font.canvas.spread_px;
-    // upsample so the tall side is ~1024 px
     let s = ((1024.0 / wf.h as f64).ceil() as usize).clamp(4, 16);
     let (uw, uh) = (wf.w * s, wf.h * s);
-    let mut gray = vec![0u8; uw * uh];
-    for y in 0..uh {
-        let fy = ((y as f32 + 0.5) / s as f32 - 0.5).max(0.0);
-        let y0 = (fy.floor() as usize).min(wf.h - 1);
-        let y1 = (y0 + 1).min(wf.h - 1);
-        let ty = (fy - y0 as f32).clamp(0.0, 1.0);
-        for x in 0..uw {
-            let fx = ((x as f32 + 0.5) / s as f32 - 0.5).max(0.0);
-            let x0 = (fx.floor() as usize).min(wf.w - 1);
-            let x1 = (x0 + 1).min(wf.w - 1);
-            let tx = (fx - x0 as f32).clamp(0.0, 1.0);
-            let a = wf.grid[y0 * wf.w + x0] * (1.0 - tx) + wf.grid[y0 * wf.w + x1] * tx;
-            let b = wf.grid[y1 * wf.w + x0] * (1.0 - tx) + wf.grid[y1 * wf.w + x1] * tx;
-            let v = (a * (1.0 - ty) + b * ty) as f64;
-            // signed distance in upsampled px -> 1.2 px coverage ramp
-            let d = v * spread * s as f64;
-            let alpha = ((d / 1.2) + 0.5).clamp(0.0, 1.0);
-            gray[y * uw + x] = (alpha * 255.0) as u8;
-        }
-    }
-    let mut png_bytes: Vec<u8> = Vec::new();
-    image::GrayImage::from_raw(uw as u32, uh as u32, gray)
-        .unwrap()
-        .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-        .unwrap();
-    let mut opts = img2bez::TraceOptions::default();
+    let mut opts = img2bez::TraceOptions::for_profile(img2bez::Profile::Clean);
     opts.rtl_start = true;
-    // all-curves smooth mode: tangent-continuous outlines, no hard
-    // corners -- the right register for nastaliq
     opts.mode = img2bez::TraceMode::Smooth;
-    let outline = img2bez::trace(&png_bytes, &opts).expect("img2bez trace");
-    // outline is y-up, image height mapped to em_height units; cross
-    // the kurbo version boundary through SVG
+    let outline = img2bez::trace_sdf(wf.w, wf.h, &wf.grid, s, &opts).expect("trace_sdf");
     let path = kurbo::BezPath::from_svg(&outline.to_svg_path()).expect("svg parse");
     let placed: Vec<(kurbo::BezPath, f64, f64)> = vec![(path, 0.0, 0.0)];
     let scale = uh as f64 / opts.em_height;

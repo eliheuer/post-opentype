@@ -55,7 +55,8 @@ struct Gpu {
 
 fn parse_log(path: &str) -> (RunInfo, Vec<Epoch>) {
     let mut info = RunInfo::default();
-    let mut epochs = Vec::new();
+    let mut epochs: Vec<Epoch> = Vec::new();
+    let mut epoch_offset: u32 = 0;
     let Ok(text) = std::fs::read_to_string(path) else {
         return (info, epochs);
     };
@@ -77,9 +78,16 @@ fn parse_log(path: &str) -> (RunInfo, Vec<Epoch>) {
             info.resumed = true;
         } else if t.len() >= 12 && t[0] == "epoch" {
             // epoch N train loss X val mse Y val IoU Z (Ss)
+            // Resumed legs restart the counter at 1 in the same log;
+            // offset so the chart shows cumulative epochs.
             let secs = t[11].trim_matches(|c| c == '(' || c == ')' || c == 's');
+            let raw: u32 = t[1].parse().unwrap_or(0);
+            let last = epochs.last().map(|e: &Epoch| e.n).unwrap_or(0);
+            if raw + epoch_offset <= last {
+                epoch_offset = last;
+            }
             epochs.push(Epoch {
-                n: t[1].parse().unwrap_or(0),
+                n: raw + epoch_offset,
                 loss: t[4].parse().unwrap_or(0.0),
                 mse: t[7].parse().unwrap_or(0.0),
                 iou: t[10].parse().unwrap_or(0.0),

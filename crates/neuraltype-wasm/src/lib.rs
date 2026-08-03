@@ -403,39 +403,24 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
 /// mapped back to field pixels (y-down). None on any failure -- the
 /// caller falls back to the fast tracer.
 fn trace_word_i2b(f: &FieldFont, wf: &field_text::WordField) -> Option<kurbo::BezPath> {
+    let _ = f;
     if wf.w == 0 || wf.h == 0 {
         return None;
     }
-    let spread = f.canvas.spread_px;
+    // trace the field itself: img2bez samples the SDF lazily at
+    // supersample density -- no raster is ever built, and no u8
+    // quantization touches the contour
     let s = ((640.0 / wf.h as f64).ceil() as usize).clamp(3, 8);
-    let (uw, uh) = (wf.w * s, wf.h * s);
-    let mut gray = vec![0u8; uw * uh];
-    for y in 0..uh {
-        let fy = ((y as f32 + 0.5) / s as f32 - 0.5).max(0.0);
-        let y0 = (fy.floor() as usize).min(wf.h - 1);
-        let y1 = (y0 + 1).min(wf.h - 1);
-        let ty = (fy - y0 as f32).clamp(0.0, 1.0);
-        for x in 0..uw {
-            let fx = ((x as f32 + 0.5) / s as f32 - 0.5).max(0.0);
-            let x0 = (fx.floor() as usize).min(wf.w - 1);
-            let x1 = (x0 + 1).min(wf.w - 1);
-            let tx = (fx - x0 as f32).clamp(0.0, 1.0);
-            let a = wf.grid[y0 * wf.w + x0] * (1.0 - tx) + wf.grid[y0 * wf.w + x1] * tx;
-            let b = wf.grid[y1 * wf.w + x0] * (1.0 - tx) + wf.grid[y1 * wf.w + x1] * tx;
-            let v = (a * (1.0 - ty) + b * ty) as f64;
-            let d = v * spread * s as f64;
-            gray[y * uw + x] = (((d / 1.2) + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
-        }
-    }
-    let mut opts = img2bez::TraceOptions::default();
+    let mut opts = img2bez::TraceOptions::for_profile(img2bez::Profile::Clean);
     opts.rtl_start = true;
     // all-curves smooth mode: tangent-continuous outlines, no hard
     // corners -- the right register for nastaliq
     opts.mode = img2bez::TraceMode::Smooth;
-    let outline = img2bez::trace_gray(uw as u32, uh as u32, gray, &opts).ok()?;
+    let outline = img2bez::trace_sdf(wf.w, wf.h, &wf.grid, s, &opts).ok()?;
+    // outline is y-up, supersampled height mapped to em_height units;
+    // cross the kurbo version boundary through SVG
     let path = kurbo::BezPath::from_svg(&outline.to_svg_path()).ok()?;
-    // unit space (y-up, image height = em_height) -> field px (y-down)
-    let k = uh as f64 / (opts.em_height * s as f64);
+    let k = wf.h as f64 / opts.em_height;
     let a = kurbo::Affine::new([k, 0.0, 0.0, -k, 0.0, wf.h as f64]);
     Some(a * path)
 }
