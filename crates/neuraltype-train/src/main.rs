@@ -147,13 +147,21 @@ struct Model {
 const EMB: usize = 24;
 const LATENT: usize = 256;
 const C0: usize = 128;
-const GRID0: (usize, usize) = (7, 5); // grows ×2 five times → (224, 160)
+
+/// Seed grid for the deconvolution stack: five stride-2 layers grow
+/// it 32x, so the seed is the canvas dims divided by 32, rounded up.
+/// (7, 5) for the 64 px/em canvas; larger canvases derive larger
+/// seeds automatically.
+fn grid0_for(h: usize, w: usize) -> (usize, usize) {
+    ((h + 31) / 32, (w + 31) / 32)
+}
 
 impl Model {
     fn new(vb: &VarBuilder, vocab: usize, h: usize, w: usize) -> candle_core::Result<Self> {
+        let g0 = grid0_for(h, w);
         let emb = embedding(vocab, EMB, vb.pp("emb"))?;
         let l1 = linear(5 * EMB, LATENT, vb.pp("l1"))?;
-        let l2 = linear(LATENT, C0 * GRID0.0 * GRID0.1, vb.pp("l2"))?;
+        let l2 = linear(LATENT, C0 * g0.0 * g0.1, vb.pp("l2"))?;
         let disp = linear(LATENT, 2, vb.pp("disp"))?;
         let chans = [C0, 64, 32, 16, 8, 1];
         let cfg = ConvTranspose2dConfig { padding: 1, output_padding: 0, stride: 2, dilation: 1 };
@@ -177,7 +185,8 @@ impl Model {
         let z = self.l1.forward(&e)?.relu()?;
         let disp = self.disp.forward(&z)?;
         let x = self.l2.forward(&z)?.relu()?;
-        let mut x = x.reshape((b, C0, GRID0.0, GRID0.1))?;
+        let g0 = grid0_for(self.h, self.w);
+        let mut x = x.reshape((b, C0, g0.0, g0.1))?;
         for (i, d) in self.deconvs.iter().enumerate() {
             x = d.forward(&x)?;
             if i + 1 < self.deconvs.len() {

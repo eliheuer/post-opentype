@@ -59,7 +59,11 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
         "style": style,
         "vocab": vocab,
         "arch": {
-            "emb": 24, "latent": 256, "c0": 128, "grid0": [7, 5],
+            "emb": 24, "latent": 256, "c0": 128,
+            "grid0": [
+                (fmeta["h"].as_u64().unwrap() as usize + 31) / 32,
+                (fmeta["w"].as_u64().unwrap() as usize + 31) / 32
+            ],
             "chans": [128, 64, 32, 16, 8, 1],
             "kernel": 4, "stride": 2, "padding": 1,
         },
