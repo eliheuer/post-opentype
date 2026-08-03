@@ -377,6 +377,9 @@ fn trace_word_i2b(f: &FieldFont, wf: &field_text::WordField) -> Option<kurbo::Be
         .ok()?;
     let mut opts = img2bez::TraceOptions::default();
     opts.rtl_start = true;
+    // all-curves smooth mode: tangent-continuous outlines, no hard
+    // corners -- the right register for nastaliq
+    opts.mode = img2bez::TraceMode::Smooth;
     let outline = img2bez::trace(&png_bytes, &opts).ok()?;
     let path = kurbo::BezPath::from_svg(&outline.to_svg_path()).ok()?;
     // unit space (y-up, image height = em_height) -> field px (y-down)

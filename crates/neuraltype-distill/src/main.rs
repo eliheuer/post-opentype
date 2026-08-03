@@ -187,6 +187,9 @@ fn renderword2(ntf: &str, word: &str, out: &str) {
         .unwrap();
     let mut opts = img2bez::TraceOptions::default();
     opts.rtl_start = true;
+    // all-curves smooth mode: tangent-continuous outlines, no hard
+    // corners -- the right register for nastaliq
+    opts.mode = img2bez::TraceMode::Smooth;
     let outline = img2bez::trace(&png_bytes, &opts).expect("img2bez trace");
     // outline is y-up, image height mapped to em_height units; cross
     // the kurbo version boundary through SVG
