@@ -430,11 +430,15 @@ fn trace_word_i2b(f: &FieldFont, wf: &field_text::WordField) -> Option<kurbo::Be
     let s = ((640.0 / wf.h as f64).ceil() as usize).clamp(3, 8);
     let mut opts = img2bez::TraceOptions::for_profile(img2bez::Profile::Clean);
     opts.rtl_start = true;
+    // faithful: the field's iso-contour is the truth; fit it tightly
+    // and skip the type-design cleanup that closes small counters
+    opts.faithful = true;
+    opts.fit_accuracy = 0.8;
     // all-curves smooth mode: every point tangent-continuous. Safe
     // now: img2bez attenuates handle length as a join sharpens, so
     // taper tips become small rounded caps instead of inverting into
     // loops on imperfect fields.
-    opts.mode = img2bez::TraceMode::Smooth;
+    opts.mode = img2bez::TraceMode::SmoothG2;
     let outline = img2bez::trace_sdf(wf.w, wf.h, &wf.grid, s, &opts).ok()?;
     // outline is y-up, supersampled height mapped to em_height units;
     // cross the kurbo version boundary through SVG

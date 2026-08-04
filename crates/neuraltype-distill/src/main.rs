@@ -163,9 +163,13 @@ fn renderword2(ntf: &str, word: &str, out: &str) {
     let (uw, uh) = (wf.w * s, wf.h * s);
     let mut opts = img2bez::TraceOptions::for_profile(img2bez::Profile::Clean);
     opts.rtl_start = true;
+    // faithful: the field's iso-contour is the truth; fit it tightly
+    // and skip the type-design cleanup that closes small counters
+    opts.faithful = true;
+    opts.fit_accuracy = 0.8;
     opts.mode = match std::env::var("NTF_I2B_MODE").as_deref() {
         Ok("default") => img2bez::TraceMode::Default,
-        _ => img2bez::TraceMode::Smooth,
+        _ => img2bez::TraceMode::SmoothG2,
     };
     let outline = img2bez::trace_sdf(wf.w, wf.h, &wf.grid, s, &opts).expect("trace_sdf");
     let path = kurbo::BezPath::from_svg(&outline.to_svg_path()).expect("svg parse");
