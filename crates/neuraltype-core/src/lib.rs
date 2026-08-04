@@ -17,6 +17,7 @@ pub mod font;
 pub mod model;
 pub mod shape;
 pub mod trace;
+pub mod vector_model;
 
 /// Glyph canvas dimensions, in grid cells.
 pub const GRID_W: usize = 16;

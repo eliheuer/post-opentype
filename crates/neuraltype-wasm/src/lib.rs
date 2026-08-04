@@ -9,6 +9,7 @@ use wasm_bindgen::prelude::*;
 enum Font {
     Kufic(NeuralFont),
     Field(FieldFont),
+    Vector(neuraltype_core::vector_model::VectorFont),
 }
 
 #[wasm_bindgen]
@@ -33,6 +34,16 @@ impl NtfFont {
     #[wasm_bindgen(constructor)]
     pub fn new(bytes: &[u8]) -> Result<NtfFont, JsError> {
         console_error_panic_hook::set_once();
+        if neuraltype_core::vector_model::is_vector_font(bytes) {
+            return neuraltype_core::vector_model::VectorFont::load(bytes)
+                .map(|f| NtfFont {
+                    inner: Font::Vector(f),
+                    node_offsets: Default::default(),
+                    word_traces: Default::default(),
+                    quality_trace: std::cell::Cell::new(true),
+                })
+                .map_err(|e| JsError::new(&e));
+        }
         if neuraltype_core::field_model::is_field_font(bytes) {
             return FieldFont::load(bytes)
                 .map(|f| NtfFont {
@@ -78,15 +89,19 @@ impl NtfFont {
     /// as an SVG path in word-grid coordinates, without caching.
     /// Workers call this off the main thread.
     pub fn trace_word_svg(&self, word: &str) -> String {
-        let f = match &self.inner {
-            Font::Field(f) => f,
-            _ => return String::new(),
-        };
         if word.is_empty() {
             return String::new();
         }
-        let wf = field_text::compose_word(f, word);
-        trace_word_i2b(f, &wf).map(|p| p.to_svg()).unwrap_or_default()
+        match &self.inner {
+            Font::Field(f) => {
+                let wf = field_text::compose_word(f, word);
+                trace_word_i2b(f, &wf).map(|p| p.to_svg()).unwrap_or_default()
+            }
+            // vector fonts: the "trace" IS the model -- greedy decode
+            // of every cluster, composed on the displacement chain
+            Font::Vector(f) => f.compose_word(word).0.to_svg(),
+            _ => String::new(),
+        }
     }
 
     /// Install a worker-traced outline into the word cache. Returns
@@ -113,20 +128,26 @@ impl NtfFont {
     /// the editor after typing pauses; shape() itself never blocks
     /// on img2bez.
     pub fn refine_word(&self, word: &str) -> bool {
-        let f = match &self.inner {
-            Font::Field(f) => f,
-            _ => return false,
-        };
         if word.is_empty() || self.word_traces.borrow().contains_key(word) {
             return false;
         }
-        let wf = field_text::compose_word(f, word);
-        match trace_word_i2b(f, &wf) {
-            Some(p) => {
+        match &self.inner {
+            Font::Field(f) => {
+                let wf = field_text::compose_word(f, word);
+                match trace_word_i2b(f, &wf) {
+                    Some(p) => {
+                        self.word_traces.borrow_mut().insert(word.to_string(), p);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            Font::Vector(f) => {
+                let (p, _) = f.compose_word(word);
                 self.word_traces.borrow_mut().insert(word.to_string(), p);
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
@@ -141,6 +162,7 @@ impl NtfFont {
                     self.quality_trace.get(),
                 )
             }
+            Font::Vector(f) => return shape_vector(f, text, &self.word_traces),
             Font::Kufic(f) => f,
         };
         let dir = match dir {
@@ -186,6 +208,7 @@ impl NtfFont {
         match &self.inner {
             Font::Kufic(f) => f.mlp.n_params(),
             Font::Field(f) => f.n_params(),
+            Font::Vector(f) => f.n_params(),
         }
     }
 
@@ -244,6 +267,7 @@ impl NtfFont {
         match &self.inner {
             Font::Kufic(f) => f.alphabet.iter().collect(),
             Font::Field(f) => f.alphabet(),
+            Font::Vector(f) => f.alphabet(),
         }
     }
 }
@@ -619,6 +643,153 @@ fn shape_field(
         "nodes": nodes_json,
         "field": true,
         "em_px": f.canvas.em_px,
+    })
+    .to_string()
+}
+
+/// Layout for vector fonts: cluster origins come from the file's
+/// displacement table (cheap -- no decode), word outlines come from
+/// the word-trace cache filled asynchronously by the worker's greedy
+/// decode. Words not yet decoded lay out by their origin span and
+/// render no ink until the decode lands; the JSON contract matches
+/// shape_field so the demo island works unchanged.
+fn shape_vector(
+    f: &neuraltype_core::vector_model::VectorFont,
+    text: &str,
+    traces: &std::cell::RefCell<std::collections::HashMap<String, kurbo::BezPath>>,
+) -> String {
+    use neuraltype_core::vector_model::VCluster;
+    let em = f.em_px();
+    let space = 0.12 * em;
+    struct PW {
+        path: Option<kurbo::BezPath>,
+        clusters: Vec<VCluster>,
+        dx: f64,
+        char_base: usize,
+        n_chars: usize,
+        ink_l: f64,
+        ink_r: f64,
+    }
+    let mut pen_right = 0.0f64;
+    let mut y_min = -1.2 * em;
+    let mut y_max = 0.5 * em;
+    let mut words: Vec<PW> = Vec::new();
+    let mut char_base = 0usize;
+    for word in text.split(' ') {
+        let n_chars = word.chars().count();
+        if word.is_empty() {
+            pen_right -= space;
+            char_base += 1;
+            continue;
+        }
+        let clusters = f.word_layout(word);
+        if clusters.is_empty() {
+            char_base += n_chars + 1;
+            continue;
+        }
+        let path = traces.borrow().get(word).cloned();
+        // ink extents: the decoded outline's bbox when we have it,
+        // else the origin span padded by a glyph-ish width
+        let (ink_l, ink_r) = match &path {
+            Some(p) if !p.elements().is_empty() => {
+                let b = kurbo::Shape::bounding_box(p);
+                y_min = y_min.min(b.y0);
+                y_max = y_max.max(b.y1);
+                (b.x0, b.x1)
+            }
+            _ => {
+                let lo = clusters.iter().map(|c| c.ox).fold(f64::MAX, f64::min);
+                let hi = clusters.iter().map(|c| c.ox).fold(f64::MIN, f64::max);
+                (lo - 0.55 * em, hi + 0.25 * em)
+            }
+        };
+        let dx = pen_right - ink_r;
+        pen_right -= (ink_r - ink_l) + space;
+        words.push(PW { path, clusters, dx, char_base, n_chars, ink_l, ink_r });
+        char_base += n_chars + 1;
+    }
+    let width = -pen_right - space.min(-pen_right);
+    let shift = width;
+    let baseline_y = -y_min;
+
+    let mut combined = String::new();
+    let mut spans: Vec<serde_json::Value> = Vec::new();
+    let n = text.chars().count();
+    let mut nodes: Vec<(f64, f64)> = vec![(f64::NAN, f64::NAN); n + 1];
+    for pw in &words {
+        if let Some(p) = &pw.path {
+            let moved = kurbo::Affine::translate((pw.dx + shift, -y_min)) * p.clone();
+            combined.push_str(&moved.to_svg());
+            combined.push(' ');
+        }
+        let cl = &pw.clusters;
+        let pen_right_word = pw.dx + pw.ink_r + shift;
+        let left_ink = pw.ink_l + pw.dx + shift;
+        let mut ci = 0usize;
+        for (k, c) in cl.iter().enumerate() {
+            let right = if k == 0 { pen_right_word } else { cl[k - 1].ox + pw.dx + shift };
+            let left = if k + 1 < cl.len() { cl[k + 1].ox + pw.dx + shift } else { left_ink };
+            let nch = c.letters.chars().count();
+            let cw_ = (right - left).max(1.0) / nch as f64;
+            for j in 0..nch {
+                let i = pw.char_base + ci + j;
+                spans.push(serde_json::json!({
+                    "i": i,
+                    "x": right - (j as f64 + 1.0) * cw_,
+                    "w": cw_,
+                }));
+                if i <= n {
+                    if k == 0 && j == 0 {
+                        nodes[i] = (pw.ink_r + pw.dx + shift + space * 0.25, c.oy - y_min);
+                    } else if nch == 1 {
+                        nodes[i] = (c.ox + pw.dx + shift, c.oy - y_min);
+                    } else {
+                        nodes[i] = (right - (j as f64 + 0.5) * cw_, c.oy - y_min);
+                    }
+                }
+            }
+            ci += nch;
+        }
+        let end_i = pw.char_base + pw.n_chars;
+        if end_i <= n {
+            let last_y = cl.last().map(|c| c.oy).unwrap_or(0.0);
+            nodes[end_i] = (left_ink - space * 0.5, last_y - y_min);
+        }
+    }
+    let mut last: Option<(f64, f64)> = None;
+    for p in nodes.iter_mut() {
+        if p.0.is_nan() {
+            if let Some(q) = last {
+                *p = q;
+            }
+        } else {
+            last = Some(*p);
+        }
+    }
+    let mut next: Option<(f64, f64)> = None;
+    for p in nodes.iter_mut().rev() {
+        if p.0.is_nan() {
+            *p = next.unwrap_or((shift, baseline_y));
+        } else {
+            next = Some(*p);
+        }
+    }
+    let nodes_json: Vec<serde_json::Value> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| serde_json::json!({ "i": i, "x": p.0, "y": p.1 }))
+        .collect();
+    serde_json::json!({
+        "width": width,
+        "grid_h": (y_max - y_min).ceil(),
+        "baseline": baseline_y.round(),
+        "rtl": true,
+        "path": combined,
+        "glyphs": [],
+        "spans": spans,
+        "nodes": nodes_json,
+        "field": true,
+        "em_px": em,
     })
     .to_string()
 }

@@ -264,6 +264,21 @@ fn main() -> candle_core::Result<()> {
             args.get(3).expect("word"),
         );
     }
+    if args.first().map(String::as_str) == Some("export") {
+        return export(
+            args.get(1).expect("usage: ntf-train-vec export <out-dir> <vec-dir> <extract-dir> <out.ntf>"),
+            args.get(2).expect("vec dir"),
+            args.get(3).expect("extract dir"),
+            args.get(4).expect("out .ntf path"),
+        );
+    }
+    if args.first().map(String::as_str) == Some("render") {
+        return render_ntf(
+            args.get(1).expect("usage: ntf-train-vec render <ntf> <word> [out.svg]"),
+            args.get(2).expect("word"),
+            args.get(3).map(String::as_str),
+        );
+    }
     let vec_dir = args.first().expect("usage: ntf-train-vec <vec-dir> <out-dir> [epochs]");
     let out_dir = args.get(1).expect("out dir");
     let epochs: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
@@ -433,6 +448,156 @@ fn sample(out_dir: &str, vec_dir: &str, word: &str) -> candle_core::Result<()> {
         .unwrap();
         println!("{letters}: {} tokens -> {path}", toks.len());
     }
+    Ok(())
+}
+
+/// Export the trained checkpoint to a "neuraltype-vector-v1" .ntf:
+/// magic + JSON header + f32 LE weights in a fixed order, plus a
+/// per-context displacement table aggregated from the extraction
+/// (the transformer has no displacement head yet). Dims come from
+/// the same NTF_* env vars as training -- export with the run's env.
+fn export(out_dir: &str, vec_dir: &str, extract_dir: &str, out_path: &str) -> candle_core::Result<()> {
+    use std::io::Write as _;
+    let tok_vocab: Vec<String> =
+        serde_json::from_str(&std::fs::read_to_string(format!("{vec_dir}/vocab.json")).unwrap())
+            .unwrap();
+    let letter_vocab: Vec<String> = serde_json::from_str(
+        &std::fs::read_to_string(format!("{out_dir}/letter-vocab.json")).unwrap(),
+    )
+    .unwrap();
+    let lmap: HashMap<&str, u32> =
+        letter_vocab.iter().enumerate().map(|(i, s)| (s.as_str(), i as u32)).collect();
+
+    // displacement table: mean from-prev displacement per context
+    // tuple; word-first tuples (prev = none) store the absolute
+    // origin instead, matching the field format's layout convention
+    #[derive(serde::Deserialize)]
+    struct CtxRec {
+        letters: String,
+        prev2: Option<char>,
+        prev: Option<char>,
+        next: Option<char>,
+        next2: Option<char>,
+        ddx: Option<i32>,
+        ddy: Option<i32>,
+        ox: i32,
+        oy: i32,
+    }
+    let mut acc: HashMap<[u32; 5], ([f64; 2], usize)> = HashMap::new();
+    let text = std::fs::read_to_string(format!("{extract_dir}/contexts.jsonl")).unwrap();
+    for line in text.lines() {
+        let r: CtxRec = serde_json::from_str(line).unwrap();
+        let idc = |c: Option<char>| -> u32 {
+            c.and_then(|c| lmap.get(c.to_string().as_str()).copied()).unwrap_or(0)
+        };
+        let f = [
+            idc(r.prev2),
+            idc(r.prev),
+            *lmap.get(r.letters.as_str()).unwrap_or(&0),
+            idc(r.next),
+            idc(r.next2),
+        ];
+        let (dx, dy) = match (r.ddx, r.ddy) {
+            (Some(dx), Some(dy)) => (dx as f64, dy as f64),
+            _ => (r.ox as f64, r.oy as f64),
+        };
+        let e = acc.entry(f).or_insert(([0.0, 0.0], 0));
+        e.0[0] += dx;
+        e.0[1] += dy;
+        e.1 += 1;
+    }
+    let mut disp_rows: Vec<f32> = Vec::with_capacity(acc.len() * 7);
+    let mut keys: Vec<[u32; 5]> = acc.keys().copied().collect();
+    keys.sort();
+    for k in &keys {
+        let (sum, n) = &acc[k];
+        disp_rows.extend(k.iter().map(|&v| v as f32));
+        disp_rows.push((sum[0] / *n as f64) as f32);
+        disp_rows.push((sum[1] / *n as f64) as f32);
+    }
+
+    let bytes = std::fs::read(format!("{out_dir}/checkpoint.safetensors")).unwrap();
+    let st = safetensors::SafeTensors::deserialize(&bytes).unwrap();
+    let mut order: Vec<String> =
+        vec!["tok_emb.weight".into(), "ctx_emb.weight".into(), "pos_emb.weight".into()];
+    for i in 0..(*LAYERS) {
+        for n in ["ln1", "qkv", "proj", "ln2", "fc1", "fc2"] {
+            order.push(format!("b{i}.{n}.weight"));
+            order.push(format!("b{i}.{n}.bias"));
+        }
+    }
+    for n in ["ln_f.weight", "ln_f.bias", "head.weight", "head.bias"] {
+        order.push(n.into());
+    }
+    let mut tensors_meta = Vec::new();
+    let mut blob: Vec<u8> = Vec::new();
+    for name in &order {
+        let t = st.tensor(name).unwrap_or_else(|_| panic!("missing tensor {name}"));
+        assert_eq!(t.dtype(), safetensors::Dtype::F32);
+        tensors_meta.push(serde_json::json!({ "name": name, "shape": t.shape() }));
+        blob.extend_from_slice(t.data());
+    }
+    tensors_meta.push(serde_json::json!({ "name": "disp.table", "shape": [keys.len(), 7] }));
+    for v in &disp_rows {
+        blob.extend_from_slice(&v.to_le_bytes());
+    }
+    let max_pos = st.tensor("pos_emb.weight").unwrap().shape()[0];
+
+    let header = serde_json::json!({
+        "license": "OFL-1.1",
+        "notice": "Derived from Gulzar (Copyright 2021 The Gulzar Project Authors, https://github.com/simoncozens/Gulzar), licensed under the SIL Open Font License 1.1.",
+        "format": "neuraltype-vector-v1",
+        "script": "arabic",
+        "style": "nastaliq-gulzar",
+        "tok_vocab": tok_vocab,
+        "letter_vocab": letter_vocab,
+        "arch": {
+            "d": (*D), "layers": (*LAYERS), "heads": (*HEADS), "ffn": (*FFN),
+            "prefix": PREFIX, "max_pos": max_pos,
+        },
+        "units": { "upm": 1000.0, "em_px": 96.0, "q_units": 2.0, "dmax": DMAX },
+        "tensors": tensors_meta,
+    });
+    let mut hjson = serde_json::to_vec(&header).unwrap();
+    while (8 + hjson.len()) % 4 != 0 {
+        hjson.push(b' ');
+    }
+    let mut f = std::fs::File::create(out_path).unwrap();
+    f.write_all(b"NTF0").unwrap();
+    f.write_all(&(hjson.len() as u32).to_le_bytes()).unwrap();
+    f.write_all(&hjson).unwrap();
+    f.write_all(&blob).unwrap();
+    println!(
+        "wrote {out_path}: {} bytes ({} weights, {} disp contexts)",
+        8 + hjson.len() + blob.len(),
+        blob.len() / 4 - disp_rows.len(),
+        keys.len()
+    );
+    Ok(())
+}
+
+/// Load an exported vector .ntf with the engine's own inference and
+/// render one word to an SVG -- the end-to-end plumbing check.
+fn render_ntf(ntf_path: &str, word: &str, out: Option<&str>) -> candle_core::Result<()> {
+    let bytes = std::fs::read(ntf_path).unwrap();
+    assert!(neuraltype_core::vector_model::is_vector_font(&bytes), "not a vector font");
+    let font = neuraltype_core::vector_model::VectorFont::load(&bytes).unwrap();
+    println!("loaded: {} params, alphabet {} letters", font.n_params(), font.alphabet().chars().count());
+    let t0 = std::time::Instant::now();
+    let (path, clusters) = font.compose_word(word);
+    println!("decoded {} clusters in {:.2}s", clusters.len(), t0.elapsed().as_secs_f64());
+    let svg = kurbo::BezPath::to_svg(&path);
+    let out_path = out.map(String::from).unwrap_or_else(|| format!("build/vecntf-{word}.svg"));
+    std::fs::create_dir_all("build").ok();
+    std::fs::write(
+        &out_path,
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"-300 -150 400 250\">\
+             <path d=\"{svg}\" fill=\"#2aa35f\"/></svg>"
+        ),
+    )
+    .unwrap();
+    println!("wrote {out_path}");
     Ok(())
 }
 

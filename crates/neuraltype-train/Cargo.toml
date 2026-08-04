@@ -9,7 +9,9 @@ name = "ntf-train"
 path = "src/main.rs"
 
 [dependencies]
+neuraltype-core = { path = "../neuraltype-core" }
 candle-core = "0.9"
+kurbo.workspace = true
 candle-nn = "0.9"
 safetensors = "0.8.0"
 serde.workspace = true

@@ -1715,6 +1715,8 @@ version = "0.1.0"
 dependencies = [
  "candle-core",
  "candle-nn",
+ "kurbo 0.11.3",
+ "neuraltype-core",
  "safetensors 0.8.0",
  "serde",
  "serde_json",
