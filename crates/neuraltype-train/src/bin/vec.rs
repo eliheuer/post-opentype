@@ -272,6 +272,22 @@ fn main() -> candle_core::Result<()> {
             args.get(4).expect("out .ntf path"),
         );
     }
+    if args.first().map(String::as_str) == Some("wordjson") {
+        let bytes = std::fs::read(args.get(1).expect("usage: ntf-train-vec wordjson <ntf> <word>")).unwrap();
+        let font = neuraltype_core::vector_model::VectorFont::load(&bytes).unwrap();
+        let word = args.get(2).expect("word");
+        let (path, _) = font.compose_word(word);
+        println!(
+            "{}",
+            serde_json::json!({
+                "word": word,
+                "em_px": font.em_px(),
+                "upm": 1000.0,
+                "d": kurbo::BezPath::to_svg(&path),
+            })
+        );
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("render") {
         return render_ntf(
             args.get(1).expect("usage: ntf-train-vec render <ntf> <word> [out.svg]"),

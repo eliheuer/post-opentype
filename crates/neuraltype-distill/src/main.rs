@@ -103,6 +103,10 @@ fn main() {
             args.get(2).expect("word"),
             args.get(3).expect("out path"),
         ),
+        Some("wordjson") => wordjson(
+            args.get(1).expect("usage: distill wordjson <font.ntf> <word>"),
+            args.get(2).expect("word"),
+        ),
         Some("cascade") => cascade::cascade(
             args.get(1).expect("usage: distill cascade <font.ttf> <word> <out.rgba>"),
             args.get(2).expect("word"),
@@ -189,6 +193,37 @@ fn renderword2(ntf: &str, word: &str, out: &str) {
     }
     std::fs::write(out, &rgba).unwrap();
     println!("{uw} {uh}");
+}
+
+/// One word from a field .ntf as JSON: the img2bez-traced outline in
+/// word-space pixels (y-down, baseline y = 0), plus the unit scale.
+/// Sheet builders consume this alongside the vector model's own
+/// wordjson so both land in one coordinate frame.
+fn wordjson(ntf: &str, word: &str) {
+    use neuraltype_core::{field_model::FieldFont, field_text};
+    let font = FieldFont::load(&std::fs::read(ntf).expect("ntf")).expect("field font");
+    let wf = field_text::compose_word(&font, word);
+    let s = ((640.0 / wf.h as f64).ceil() as usize).clamp(3, 8);
+    let mut opts = img2bez::TraceOptions::for_profile(img2bez::Profile::Clean);
+    opts.rtl_start = true;
+    opts.faithful = true;
+    opts.fit_accuracy = 0.8;
+    opts.smoothing = 1.5;
+    opts.mode = img2bez::TraceMode::SmoothG2;
+    let outline = img2bez::trace_sdf(wf.w, wf.h, &wf.grid, s, &opts).expect("trace_sdf");
+    let path = kurbo::BezPath::from_svg(&outline.to_svg_path()).expect("svg parse");
+    let k = wf.h as f64 / opts.em_height;
+    let a = kurbo::Affine::new([k, 0.0, 0.0, -k, 0.0, wf.h as f64]);
+    let placed = kurbo::Affine::translate((wf.x0, wf.y0)) * (a * path);
+    println!(
+        "{}",
+        serde_json::json!({
+            "word": word,
+            "em_px": font.canvas.em_px,
+            "upm": font.canvas.upm,
+            "d": placed.to_svg(),
+        })
+    );
 }
 
 fn corpus() -> Vec<String> {

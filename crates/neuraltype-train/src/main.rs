@@ -144,29 +144,47 @@ struct Model {
     w: usize,
 }
 
-const EMB: usize = 24;
-const LATENT: usize = 256;
-const C0: usize = 128;
+/// Model dimensions, overridable per run. Raising the canvas
+/// resolution alone does not buy fidelity: it grows l2 and the seed
+/// grid while the shape code (LATENT) and the decoder's channel
+/// widths stay put, so the same amount of learned shape is spread
+/// over more pixels. Widen these instead.
+fn envd(name: &str, default: usize) -> usize {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+static EMB: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| envd("NTF_EMB", 24));
+static LATENT: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| envd("NTF_LATENT", 256));
+/// Deconvolution channel ladder, seed first and output last. Its
+/// length sets the number of stride-2 stages, and so the seed grid.
+static CHANS: std::sync::LazyLock<Vec<usize>> = std::sync::LazyLock::new(|| {
+    std::env::var("NTF_CHANS")
+        .ok()
+        .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect::<Vec<usize>>())
+        .filter(|v| v.len() >= 2)
+        .unwrap_or_else(|| vec![128, 64, 32, 16, 8, 1])
+});
+static C0: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| CHANS[0]);
 
-/// Seed grid for the deconvolution stack: five stride-2 layers grow
-/// it 32x, so the seed is the canvas dims divided by 32, rounded up.
-/// (7, 5) for the 64 px/em canvas; larger canvases derive larger
-/// seeds automatically.
+/// Seed grid for the deconvolution stack: each stride-2 layer doubles
+/// it, so the seed is the canvas dims divided by 2^stages, rounded
+/// up. (7, 5) for the 64 px/em canvas with the default five stages.
 fn grid0_for(h: usize, w: usize) -> (usize, usize) {
-    ((h + 31) / 32, (w + 31) / 32)
+    let f = 1usize << (CHANS.len() - 1);
+    ((h + f - 1) / f, (w + f - 1) / f)
 }
 
 impl Model {
     fn new(vb: &VarBuilder, vocab: usize, h: usize, w: usize) -> candle_core::Result<Self> {
         let g0 = grid0_for(h, w);
-        let emb = embedding(vocab, EMB, vb.pp("emb"))?;
-        let l1 = linear(5 * EMB, LATENT, vb.pp("l1"))?;
-        let l2 = linear(LATENT, C0 * g0.0 * g0.1, vb.pp("l2"))?;
-        let disp = linear(LATENT, 2, vb.pp("disp"))?;
-        let chans = [C0, 64, 32, 16, 8, 1];
+        let emb = embedding(vocab, *EMB, vb.pp("emb"))?;
+        let l1 = linear(5 * *EMB, *LATENT, vb.pp("l1"))?;
+        let l2 = linear(*LATENT, *C0 * g0.0 * g0.1, vb.pp("l2"))?;
+        let disp = linear(*LATENT, 2, vb.pp("disp"))?;
+        let chans = &*CHANS;
         let cfg = ConvTranspose2dConfig { padding: 1, output_padding: 0, stride: 2, dilation: 1 };
         let mut deconvs = Vec::new();
-        for i in 0..5 {
+        for i in 0..chans.len() - 1 {
             deconvs.push(conv_transpose2d(
                 chans[i],
                 chans[i + 1],
@@ -181,12 +199,12 @@ impl Model {
     /// Returns (field [B,1,h,w], displacement [B,2], latent).
     fn forward(&self, feats: &Tensor) -> candle_core::Result<(Tensor, Tensor)> {
         let b = feats.dim(0)?;
-        let e = self.emb.forward(feats)?.reshape((b, 5 * EMB))?;
+        let e = self.emb.forward(feats)?.reshape((b, 5 * *EMB))?;
         let z = self.l1.forward(&e)?.relu()?;
         let disp = self.disp.forward(&z)?;
         let x = self.l2.forward(&z)?.relu()?;
         let g0 = grid0_for(self.h, self.w);
-        let mut x = x.reshape((b, C0, g0.0, g0.1))?;
+        let mut x = x.reshape((b, *C0, g0.0, g0.1))?;
         for (i, d) in self.deconvs.iter().enumerate() {
             x = d.forward(&x)?;
             if i + 1 < self.deconvs.len() {

@@ -21,8 +21,21 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
     let bytes = std::fs::read(format!("{train_dir}/checkpoint.safetensors")).unwrap();
     let st = safetensors::SafeTensors::deserialize(&bytes).unwrap();
 
+    // Architecture is read back from the checkpoint's own tensor
+    // shapes, so a run trained with different NTF_LATENT/NTF_CHANS
+    // exports correctly without passing the env through again.
+    let n_deconv = (0..).take_while(|i| st.tensor(&format!("d{i}.weight")).is_ok()).count();
+    let emb_dim = st.tensor("emb.weight").unwrap().shape()[1];
+    let latent = st.tensor("l1.weight").unwrap().shape()[0];
+    let mut chans: Vec<usize> = vec![st.tensor("d0.weight").unwrap().shape()[0]];
+    for i in 0..n_deconv {
+        chans.push(st.tensor(&format!("d{i}.weight")).unwrap().shape()[1]);
+    }
+    let c0 = chans[0];
+    let seed_div = 1usize << n_deconv;
+
     // Fixed serialization order; names match the trainer's VarBuilder.
-    let order = [
+    let mut order: Vec<String> = [
         "emb.weight",
         "l1.weight",
         "l1.bias",
@@ -30,21 +43,18 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
         "l2.bias",
         "disp.weight",
         "disp.bias",
-        "d0.weight",
-        "d0.bias",
-        "d1.weight",
-        "d1.bias",
-        "d2.weight",
-        "d2.bias",
-        "d3.weight",
-        "d3.bias",
-        "d4.weight",
-        "d4.bias",
-    ];
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    for i in 0..n_deconv {
+        order.push(format!("d{i}.weight"));
+        order.push(format!("d{i}.bias"));
+    }
 
     let mut tensors_meta = Vec::new();
     let mut blob: Vec<u8> = Vec::new();
-    for name in order {
+    for name in &order {
         let t = st
             .tensor(name)
             .unwrap_or_else(|_| panic!("missing tensor {name}"));
@@ -61,12 +71,12 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
         "style": style,
         "vocab": vocab,
         "arch": {
-            "emb": 24, "latent": 256, "c0": 128,
+            "emb": emb_dim, "latent": latent, "c0": c0,
             "grid0": [
-                (fmeta["h"].as_u64().unwrap() as usize + 31) / 32,
-                (fmeta["w"].as_u64().unwrap() as usize + 31) / 32
+                (fmeta["h"].as_u64().unwrap() as usize + seed_div - 1) / seed_div,
+                (fmeta["w"].as_u64().unwrap() as usize + seed_div - 1) / seed_div
             ],
-            "chans": [128, 64, 32, 16, 8, 1],
+            "chans": chans,
             "kernel": 4, "stride": 2, "padding": 1,
         },
         "canvas": {
