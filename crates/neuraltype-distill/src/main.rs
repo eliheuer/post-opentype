@@ -167,6 +167,11 @@ fn renderword2(ntf: &str, word: &str, out: &str) {
     // and skip the type-design cleanup that closes small counters
     opts.faithful = true;
     opts.fit_accuracy = 0.8;
+    if let Ok(v) = std::env::var("NTF_I2B_SMOOTH") {
+        if let Ok(f) = v.parse::<f64>() {
+            opts.smoothing = f;
+        }
+    }
     opts.mode = match std::env::var("NTF_I2B_MODE").as_deref() {
         Ok("default") => img2bez::TraceMode::Default,
         _ => img2bez::TraceMode::SmoothG2,
