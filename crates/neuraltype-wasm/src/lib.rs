@@ -22,6 +22,9 @@ pub struct NtfFont {
     /// y-down). Words being dragged bypass this and use the fast
     /// tracer until released.
     word_traces: std::cell::RefCell<std::collections::HashMap<String, kurbo::BezPath>>,
+    /// When false, shape() ignores the img2bez cache and draws every
+    /// word with the fast tracer -- a live A/B switch for debugging.
+    quality_trace: std::cell::Cell<bool>,
 }
 
 #[wasm_bindgen]
@@ -36,6 +39,7 @@ impl NtfFont {
                     inner: Font::Field(f),
                     node_offsets: Default::default(),
                     word_traces: Default::default(),
+                    quality_trace: std::cell::Cell::new(true),
                 })
                 .map_err(|e| JsError::new(&e));
         }
@@ -44,6 +48,7 @@ impl NtfFont {
                 inner: Font::Kufic(f),
                 node_offsets: Default::default(),
                 word_traces: Default::default(),
+                quality_trace: std::cell::Cell::new(true),
             })
             .map_err(|e| JsError::new(&e))
     }
@@ -61,6 +66,12 @@ impl NtfFont {
 
     pub fn clear_node_offsets(&self) {
         self.node_offsets.borrow_mut().clear();
+    }
+
+    /// Toggle the img2bez quality tracer (true) vs the fast marching
+    /// squares tracer (false) for rendering.
+    pub fn set_quality_trace(&self, on: bool) {
+        self.quality_trace.set(on);
     }
 
     /// Trace one word with the img2bez fitter and return the outline
@@ -122,7 +133,13 @@ impl NtfFont {
     pub fn shape(&self, text: &str, elong: f64, dir: &str) -> String {
         let inner = match &self.inner {
             Font::Field(f) => {
-                return shape_field(f, text, &self.node_offsets.borrow(), &self.word_traces)
+                return shape_field(
+                    f,
+                    text,
+                    &self.node_offsets.borrow(),
+                    &self.word_traces,
+                    self.quality_trace.get(),
+                )
             }
             Font::Kufic(f) => f,
         };
@@ -413,9 +430,12 @@ fn trace_word_i2b(f: &FieldFont, wf: &field_text::WordField) -> Option<kurbo::Be
     let s = ((640.0 / wf.h as f64).ceil() as usize).clamp(3, 8);
     let mut opts = img2bez::TraceOptions::for_profile(img2bez::Profile::Clean);
     opts.rtl_start = true;
-    // all-curves smooth mode: tangent-continuous outlines, no hard
-    // corners -- the right register for nastaliq
-    opts.mode = img2bez::TraceMode::Smooth;
+    // Default mode, not Smooth: forcing every point tangent-continuous
+    // inverts into loops at cusps when the field is imperfect (words
+    // outside the corpus, mid-typing states). Default keeps detected
+    // corners and degrades gracefully. A corner-aware smooth mode is
+    // the img2bez follow-up.
+    opts.mode = img2bez::TraceMode::Default;
     let outline = img2bez::trace_sdf(wf.w, wf.h, &wf.grid, s, &opts).ok()?;
     // outline is y-up, supersampled height mapped to em_height units;
     // cross the kurbo version boundary through SVG
@@ -430,6 +450,7 @@ fn shape_field(
     text: &str,
     offsets: &NodeOffsets,
     traces: &std::cell::RefCell<std::collections::HashMap<String, kurbo::BezPath>>,
+    quality: bool,
 ) -> String {
     let line = build_field_line(f, text, offsets);
     let shift = line.width;
@@ -451,7 +472,7 @@ fn shape_field(
             .collect();
         let word_has_offsets = (pw.char_base..pw.char_base + pw.n_chars)
             .any(|i| offsets.contains_key(&i));
-        let cached = traces.borrow().get(&word_str).cloned();
+        let cached = if quality { traces.borrow().get(&word_str).cloned() } else { None };
         // never trace img2bez inside shape(): typing stays instant on
         // the fast tracer, and refine_word() upgrades words to the
         // img2bez outline asynchronously
