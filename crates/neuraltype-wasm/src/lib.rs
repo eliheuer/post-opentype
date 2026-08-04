@@ -434,6 +434,9 @@ fn trace_word_i2b(f: &FieldFont, wf: &field_text::WordField) -> Option<kurbo::Be
     // and skip the type-design cleanup that closes small counters
     opts.faithful = true;
     opts.fit_accuracy = 0.8;
+    // arc-length low-pass strength: 1.0 keeps slight field wobble,
+    // 2.0 starts softening detail; 1.5 is the calibrated middle
+    opts.smoothing = 1.5;
     // all-curves smooth mode: every point tangent-continuous. Safe
     // now: img2bez attenuates handle length as a join sharpens, so
     // taper tips become small rounded caps instead of inverting into
