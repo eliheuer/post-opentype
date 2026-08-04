@@ -22,10 +22,20 @@ use candle_nn::Optimizer;
 use candle_nn::{embedding, layer_norm, linear, Embedding, LayerNorm, Linear, Module, VarBuilder, VarMap};
 use std::collections::HashMap;
 
-const D: usize = 192;
-const LAYERS: usize = 4;
-const HEADS: usize = 4;
-const FFN: usize = 768;
+/// Model dimensions, env-overridable for experiments. Defaults are
+/// the 12M-parameter configuration (Virtua-12M class): 7 layers,
+/// 384 dims, 8 heads. The first 2M prototype was 4/192/4/768 and
+/// plateaued at 41% token accuracy.
+fn envd(name: &str, default: usize) -> usize {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+static D: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| envd("NTF_D", 384));
+static LAYERS: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| envd("NTF_LAYERS", 7));
+static HEADS: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| envd("NTF_HEADS", 8));
+static FFN: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| envd("NTF_FFN", 1536));
 const PREFIX: usize = 5;
 const DMAX: i64 = 63;
 
@@ -105,25 +115,25 @@ struct Block {
 impl Block {
     fn new(vb: &VarBuilder) -> candle_core::Result<Self> {
         Ok(Block {
-            ln1: layer_norm(D, 1e-5, vb.pp("ln1"))?,
-            qkv: linear(D, 3 * D, vb.pp("qkv"))?,
-            proj: linear(D, D, vb.pp("proj"))?,
-            ln2: layer_norm(D, 1e-5, vb.pp("ln2"))?,
-            fc1: linear(D, FFN, vb.pp("fc1"))?,
-            fc2: linear(FFN, D, vb.pp("fc2"))?,
+            ln1: layer_norm((*D), 1e-5, vb.pp("ln1"))?,
+            qkv: linear((*D), 3 * (*D), vb.pp("qkv"))?,
+            proj: linear((*D), (*D), vb.pp("proj"))?,
+            ln2: layer_norm((*D), 1e-5, vb.pp("ln2"))?,
+            fc1: linear((*D), (*FFN), vb.pp("fc1"))?,
+            fc2: linear((*FFN), (*D), vb.pp("fc2"))?,
         })
     }
 
     fn forward(&self, x: &Tensor, mask: &Tensor) -> candle_core::Result<Tensor> {
         let (b, t, _) = x.dims3()?;
-        let hd = D / HEADS;
+        let hd = (*D) / (*HEADS);
         let h = self.ln1.forward(x)?;
         let qkv = self.qkv.forward(&h)?; // [b,t,3D]
-        let q = qkv.narrow(2, 0, D)?;
-        let k = qkv.narrow(2, D, D)?;
-        let v = qkv.narrow(2, 2 * D, D)?;
+        let q = qkv.narrow(2, 0, (*D))?;
+        let k = qkv.narrow(2, (*D), (*D))?;
+        let v = qkv.narrow(2, 2 * (*D), (*D))?;
         let shape = |z: &Tensor| -> candle_core::Result<Tensor> {
-            z.reshape((b, t, HEADS, hd))?.transpose(1, 2)?.reshape((b * HEADS, t, hd))
+            z.reshape((b, t, (*HEADS), hd))?.transpose(1, 2)?.reshape((b * (*HEADS), t, hd))
         };
         let q = shape(&q)?;
         let k = shape(&k)?;
@@ -133,9 +143,9 @@ impl Block {
         let att = ops::softmax(&att, 2)?;
         let out = att.matmul(&v)?; // [b*H, t, hd]
         let out = out
-            .reshape((b, HEADS, t, hd))?
+            .reshape((b, (*HEADS), t, hd))?
             .transpose(1, 2)?
-            .reshape((b, t, D))?;
+            .reshape((b, t, (*D)))?;
         let x = (x + self.proj.forward(&out)?)?;
         let h = self.ln2.forward(&x)?;
         let m = self.fc2.forward(&self.fc1.forward(&h)?.relu()?)?;
@@ -155,25 +165,25 @@ struct Model {
 impl Model {
     fn new(vb: &VarBuilder, tok_vocab: usize, letter_vocab: usize, max_pos: usize) -> candle_core::Result<Self> {
         let mut blocks = Vec::new();
-        for i in 0..LAYERS {
+        for i in 0..(*LAYERS) {
             blocks.push(Block::new(&vb.pp(format!("b{i}")))?);
         }
         Ok(Model {
-            tok_emb: embedding(tok_vocab, D, vb.pp("tok_emb"))?,
-            ctx_emb: embedding(letter_vocab, D, vb.pp("ctx_emb"))?,
-            pos_emb: embedding(max_pos, D, vb.pp("pos_emb"))?,
+            tok_emb: embedding(tok_vocab, (*D), vb.pp("tok_emb"))?,
+            ctx_emb: embedding(letter_vocab, (*D), vb.pp("ctx_emb"))?,
+            pos_emb: embedding(max_pos, (*D), vb.pp("pos_emb"))?,
             blocks,
-            ln_f: layer_norm(D, 1e-5, vb.pp("ln_f"))?,
-            head: linear(D, tok_vocab, vb.pp("head"))?,
+            ln_f: layer_norm((*D), 1e-5, vb.pp("ln_f"))?,
+            head: linear((*D), tok_vocab, vb.pp("head"))?,
         })
     }
 
     /// ctx [B,5] letter ids; toks [B,T] token ids. Returns logits [B, 5+T, V].
     fn forward(&self, ctx: &Tensor, toks: &Tensor, mask: &Tensor, device: &Device) -> candle_core::Result<Tensor> {
         let (b, t) = toks.dims2()?;
-        let c = self.ctx_emb.forward(ctx)?; // [B,5,D]
-        let e = self.tok_emb.forward(toks)?; // [B,T,D]
-        let x = Tensor::cat(&[&c, &e], 1)?; // [B,5+T,D]
+        let c = self.ctx_emb.forward(ctx)?; // [B,5,(*D)]
+        let e = self.tok_emb.forward(toks)?; // [B,T,(*D)]
+        let x = Tensor::cat(&[&c, &e], 1)?; // [B,5+T,(*D)]
         let total = PREFIX + t;
         let pos_ids = Tensor::arange(0u32, total as u32, device)?
             .unsqueeze(0)?
