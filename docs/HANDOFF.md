@@ -11,10 +11,35 @@ not in this file. It lives in `~/Desktop/linux-training-box.md`.
 
 ## The goal right now
 
-Eli is submitting a talk to an AI and design conference in October,
-and wants the best possible working demo by roughly 2026-08-09.
-Everything should be weighed against demo readiness. The project is
-paused for a day or two as of 2026-08-04.
+This work exists to support a conference talk proposal. The proposal
+repo is `~/GH/repos/font-tech-ai-2026`
+(github.com/eliheuer/font-tech-ai-2026), and it holds the abstracts,
+the talk outlines, and the submission checklist.
+
+| | |
+| --- | --- |
+| conference | Font Tech & AI, online, organized by ILT Trust |
+| dates | 8-10 October 2026 |
+| **proposal deadline** | **10 August 2026**, aiming to submit the 6th or 7th |
+| form | https://trust.ilovetypography.com/font-tech-ai/ |
+
+Two proposals are in play and compete with each other: `proposal.md`
+is the NeuralType and nastaliq talk this repo serves, and
+`proposal-virtua.md` is a Virtua Grotesk talk. `SUBMISSION.md`
+explains how they are kept distinct if both go in.
+
+Two things follow from this for anyone working in this repo. Every
+number in `proposal.md` comes from the blog posts and must match what
+the code actually produces, so any change to the shipping model means
+updating that file. And one of the conference curators is Simon
+Cozens, who is a Gulzar author, which makes the licensing and credit
+handling in this project worth getting exactly right; there is an
+open question in `SUBMISSION.md` about whether to name the Gulzar
+authors in the abstract.
+
+The demo target was roughly 2026-08-09, to be ready alongside the
+submission. The project is paused for a day or two as of 2026-08-04
+while Virtua Grotesk gets attention.
 
 ## What ships today
 
@@ -28,6 +53,12 @@ experiments below beat it.
 | quality | contour IoU 0.945 against the teacher |
 | canvas | 155×219 signed distance field at 64 px/em |
 | teacher | Gulzar Regular (OFL), shaped by harfrust |
+
+These are the numbers `proposal.md` cites, verified against the
+shipping file on 2026-08-04 and unchanged since 2026-08-02. Two
+details to carry into the abstract if it is edited: the exact file
+is 5,433,100 bytes, and the measured IoU is 0.945, which the blog
+post and the abstract both round to 0.94.
 
 The demo island is
 `~/GH/repos/elih.net/src/components/NeuralTypeDemo.tsx`, embedded in
@@ -63,6 +94,12 @@ places, strokes do not form.
 The long version, with figures, is the section "Three ways to make
 it bigger, none of which worked" in
 `~/GH/repos/elih.net/src/content/blog/nastaliq-distilled/index.mdx`.
+
+This is also talk material. Both abstracts in
+`~/GH/repos/font-tech-ai-2026/proposal.md` promise to cover "where
+it currently fails", and as of 2026-08-04 that promise has real
+content behind it: three scaling attempts, three different reasons
+for failing, and a smallest-model-wins result.
 
 ## Next steps, ranked
 
