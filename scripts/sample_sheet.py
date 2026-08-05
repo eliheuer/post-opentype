@@ -83,8 +83,18 @@ def contexts_by_word():
     return by
 
 
-def model_word(binary, ntf, word):
-    """Run a model's wordjson and convert to font units, y-up."""
+def ntf_format(ntf):
+    """The header's format string, so the right binary decodes it."""
+    with open(ntf, "rb") as f:
+        head = f.read(8)
+        hlen = int.from_bytes(head[4:8], "little")
+        return json.loads(f.read(hlen)).get("format", "")
+
+
+def model_word(ntf, word):
+    """Run a model's wordjson and convert to font units, y-up. The
+    field and vector formats live in different binaries."""
+    binary = VEC if "vector" in ntf_format(ntf) else DISTILL
     args = [binary, "wordjson", ntf, word]
     try:
         out = subprocess.run(args, capture_output=True, text=True, timeout=600)
@@ -156,19 +166,42 @@ def cell(path_d, vb, note):
     )
 
 
+def describe(ntf):
+    """Facts a sheet can state without being told: the model's own
+    weight count and the file size on disk."""
+    size = os.path.getsize(ntf)
+    with open(ntf, "rb") as f:
+        hlen = int.from_bytes(f.read(8)[4:8], "little")
+    params = (size - 8 - hlen) // 4
+    return params, size
+
+
 def main():
     field_ntf = sys.argv[1]
     vec_ntf = sys.argv[2]
     out_path = sys.argv[3]
     words = sys.argv[4:] or DEFAULT_WORDS
+    # Labels and the closing note come from the caller: the same
+    # script builds field-vs-vector and narrow-vs-wide sheets.
+    title = os.environ.get("SHEET_TITLE", "Two models, one nastaliq")
+    lede = os.environ.get("SHEET_LEDE", "")
+    verdict = os.environ.get("SHEET_VERDICT", "")
+    name_b = os.environ.get("SHEET_B", "model B")
+    name_c = os.environ.get("SHEET_C", "model C")
+    note_b = os.environ.get("SHEET_B_NOTE", "")
+    note_c = os.environ.get("SHEET_C_NOTE", "")
+    score_b = os.environ.get("SHEET_B_SCORE", "")
+    score_c = os.environ.get("SHEET_C_SCORE", "")
+    pb, sb = describe(field_ntf)
+    pc, sc = describe(vec_ntf)
 
     glyphs = teacher_paths()
     ctx = contexts_by_word()
     rows = []
     for w in words:
         t = teacher_word(w, glyphs, ctx)
-        f = model_word(DISTILL, field_ntf, w)
-        v = model_word(VEC, vec_ntf, w)
+        f = model_word(field_ntf, w)
+        v = model_word(vec_ntf, w)
         rows.append((w, t, f, v))
         print(f"{w}: teacher {'ok' if t else '--'}  field {'ok' if f else '--'}  "
               f"vector {'ok' if v else '--'}", flush=True)
@@ -176,8 +209,8 @@ def main():
     grid = ['<div class="grid">',
             '<div class="colhead"></div>',
             '<div class="colhead">teacher <em>Gulzar outlines</em></div>',
-            '<div class="colhead">field model <em>3.1M, SDF + tracer</em></div>',
-            '<div class="colhead">vector model <em>12.7M, outline tokens</em></div>']
+            f'<div class="colhead">{name_b} <em>{note_b}</em></div>',
+            f'<div class="colhead">{name_c} <em>{note_c}</em></div>']
     for w, t, f, v in rows:
         b = union([bbox(t), bbox(f), bbox(v)])
         pad = 120
@@ -268,11 +301,8 @@ h1 {{ font-family: var(--serif); font-size: 30px; font-weight: 600; margin: 6px 
 <div class="wrap">
   <header>
     <div class="eyebrow">NeuralType · {DATE}</div>
-    <h1>Two models, one nastaliq</h1>
-    <p class="lede">The same words drawn three ways: Gulzar's own outlines, the
-    field model that ships in the demo, and the vector model that finished
-    training today. Every plate in a row shares one frame, so a fragmented
-    output reads small instead of being zoomed to fill the box.</p>
+    <h1>{title}</h1>
+    <p class="lede">{lede}</p>
   </header>
 
   <section class="stats">
@@ -283,18 +313,16 @@ h1 {{ font-family: var(--serif); font-size: 30px; font-weight: 600; margin: 6px 
       <span class="chip good">ground truth</span>
     </div>
     <div class="stat">
-      <h2>Field model</h2>
-      <dl><dt>parameters</dt><dd>3,101,483</dd>
-      <dt>file size</dt><dd>12.4 MB</dd>
-      <dt>contour IoU</dt><dd>0.825</dd></dl>
-      <span class="chip good">renders words</span>
+      <h2>{name_b}</h2>
+      <dl><dt>parameters</dt><dd>{pb:,}</dd>
+      <dt>file size</dt><dd>{sb / 1e6:.1f} MB</dd>
+      {f"<dt>contour IoU</dt><dd>{score_b}</dd>" if score_b else ""}</dl>
     </div>
     <div class="stat">
-      <h2>Vector model</h2>
-      <dl><dt>parameters</dt><dd>12,693,639</dd>
-      <dt>file size</dt><dd>53.3 MB</dd>
-      <dt>token accuracy</dt><dd>0.482</dd></dl>
-      <span class="chip bad">fragments only</span>
+      <h2>{name_c}</h2>
+      <dl><dt>parameters</dt><dd>{pc:,}</dd>
+      <dt>file size</dt><dd>{sc / 1e6:.1f} MB</dd>
+      {f"<dt>contour IoU</dt><dd>{score_c}</dd>" if score_c else ""}</dl>
     </div>
   </section>
 
@@ -302,15 +330,7 @@ h1 {{ font-family: var(--serif); font-size: 30px; font-weight: 600; margin: 6px 
     {chr(10).join(grid)}
   </div>
 
-  <section class="verdict">
-    <p>The vector model does not draw letters. After 120 epochs it emits a
-    handful of small closed contours per word: the dots land in roughly the
-    right places, but the strokes never form. Token accuracy plateaued at
-    0.482 and two learning-rate drops did not move it.</p>
-    <p>The field model is the one to present. At 96 px/em it reproduces the
-    teacher closely on ordinary words; the الله ligature is the visible
-    regression against the 64 px model, which drew it exactly.</p>
-  </section>
+  <section class="verdict">{verdict}</section>
 </div>
 """
     open(out_path, "w").write(page)
