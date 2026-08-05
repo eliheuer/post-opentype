@@ -186,6 +186,7 @@ def main():
     title = os.environ.get("SHEET_TITLE", "Two models, one nastaliq")
     lede = os.environ.get("SHEET_LEDE", "")
     verdict = os.environ.get("SHEET_VERDICT", "")
+    bare = os.environ.get("SHEET_BARE") == "1"
     name_b = os.environ.get("SHEET_B", "model B")
     name_c = os.environ.get("SHEET_C", "model C")
     note_b = os.environ.get("SHEET_B_NOTE", "")
@@ -296,9 +297,12 @@ h1 {{ font-family: var(--serif); font-size: 30px; font-weight: 600; margin: 6px 
 .verdict p {{ font-family: var(--serif); font-size: 15.5px; line-height: 1.65;
               margin: 0; max-width: 70ch; color: var(--text); }}
 .verdict p + p {{ color: var(--muted); }}
+/* figure mode: the grid alone, for embedding in a post */
+.bare header, .bare .stats, .bare .verdict {{ display: none; }}
+.bare {{ gap: 0; }}
 </style>
 
-<div class="wrap">
+<div class="wrap {'bare' if bare else ''}">
   <header>
     <div class="eyebrow">NeuralType · {DATE}</div>
     <h1>{title}</h1>

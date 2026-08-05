@@ -78,3 +78,34 @@ same gates as the field fonts.
    size, inference speed per keystroke.
 4. The winner earns the spec name and the blog's third post; the
    loser still informs the shared-prior work in COMPRESSION.md.
+
+## Result (2026-08-04): the field track wins for now
+
+All of stage 2 is built and working. The tokenizer produced 91,339
+sequences (135-token vocabulary, 17M tokens, mean length 187). The
+trainer is `crates/neuraltype-train/src/bin/vec.rs`. The engine arm
+is `crates/neuraltype-core/src/vector_model.rs`: hand-rolled
+decoder inference with a per-layer KV cache, greedy decoding, and
+the detokenizer back to béziers. Placement comes from a per-context
+displacement table in the file, so the cascade chains exactly as it
+does for field fonts. `neuraltype-wasm` loads the format, and the
+demo grows a model picker when `vectorFont` is set.
+
+What did not work is the model. A 12,693,639-parameter decoder
+(d=384, 7 layers, 8 heads, ffn 1536) trained 120 epochs plateaued at
+0.482 next-token accuracy. Two learning-rate drops (3e-4 to 1e-4)
+moved it by 0.002. Decoded output is a scatter of small closed
+contours: dots land near where dots belong, and on longer words the
+fragments follow the downward slope of the baseline, so the model
+learned something about placement. It never learned to close a
+stroke.
+
+Since token accuracy punishes an off-by-one coordinate bin as hard
+as a wrong command, the number alone was not proof; the sample sheet
+was. Build one with `scripts/sample_sheet.py` before drawing any
+conclusion from a metric.
+
+Open suspects, if this is picked up again: the delta-chaining
+tokenization may make exact-token prediction inherently noisy, and
+the training objective has no warmup and no schedule. The engine
+side needs no further work.
