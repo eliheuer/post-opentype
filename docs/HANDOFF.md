@@ -124,6 +124,31 @@ for failing, and a smallest-model-wins result.
    the objective (no learning rate schedule, no warmup). Its
    engine-side support is already written and working, so only the
    training question is open.
+6. **Richer field representations** (untested ideas, 2026-08-07).
+   Three ways to pack more shape into fewer parameters, all from the
+   same graphics-trick family as the SDF:
+   - **Multi-channel SDF (MSDF, Chlumsky's msdfgen technique).**
+     Three overlapping distance fields in RGB, median-decoded,
+     reconstruct sharp corners from much smaller grids. Attacks a
+     measured cost: in the 96 px/em run, 93% of parameters sat in
+     the one linear layer that seeds the pixel grid. If corners
+     survive at lower resolution, the canvas and that layer shrink.
+     Caveat: nastaliq is mostly smooth curves, so the win may be
+     modest; square Kufic or a geometric Latin would benefit most.
+   - **Distance plus gradient.** Predict the field's gradient
+     (edge direction) alongside the distance, per cell. Edge
+     position plus direction lets a tracer reconstruct curves from
+     coarser grids; this is the Hermite-data idea behind dual
+     contouring. Same goal as MSDF by a different route.
+   - **Coordinate network (DeepSDF / SIREN style).** Drop the grid:
+     the network takes (x, y, letter context) and returns one
+     distance. No deconv stack, no seed grid, no resolution
+     parameter at all; the tracer samples wherever it wants at any
+     precision, and every parameter describes shape rather than
+     pixels. The scaling post-mortem (pixels were never the
+     bottleneck, the seed grid was dead weight) points here. Also
+     the strongest "where this goes next" beat for the talk: the
+     font becomes a pure function from position and context to ink.
 
 ## Repo map
 
