@@ -64,11 +64,14 @@ fn main() {
 
     // ---- left panel: the field, drawn cell by cell (y-up canvas,
     // field rows are top-down, so flip) ----
+    // Both panels share the same height, and the three gaps (left
+    // margin, middle, right margin) are equal.
     let scale = 8.0;
     let pw = CW as f64 * scale;
     let ph = CH as f64 * scale;
     let cell_l = scale;
-    let gap = 120.0;
+    let zs_w = ph; // zoom panel is square, as tall as the field panel
+    let gap = (W - pw - zs_w) / 3.0;
     let lx0 = gap;
     let ly0 = (H - ph) / 2.0;
 
@@ -96,8 +99,8 @@ fn main() {
     ctx.rect(hx, hy, hs, hs);
 
     // ---- right panel: the patch as a grid of numbered cells ----
-    let cell = 150.0;
-    let zs = N as f64 * cell;
+    let zs = zs_w;
+    let cell = zs / N as f64;
     let zx0 = W - gap - zs;
     let zy0 = (H - zs) / 2.0;
 
@@ -151,25 +154,41 @@ fn main() {
             zy0 + (N as f64 - 1.0 - j + 0.5) * cell,
         )
     };
+    // Bilinear interpolation of the sample values, in sample
+    // coordinates (fi, fj) with samples at integer positions.
+    let val = |fi: f64, fj: f64| {
+        let i0 = (fi.floor() as usize).min(N - 2);
+        let j0 = (fj.floor() as usize).min(N - 2);
+        let (tx, ty) = (fi - i0 as f64, fj - j0 as f64);
+        let v = |i: usize, j: usize| at(px0 + i, py0 + j) as f64 - 128.0;
+        v(i0, j0) * (1.0 - tx) * (1.0 - ty)
+            + v(i0 + 1, j0) * tx * (1.0 - ty)
+            + v(i0, j0 + 1) * (1.0 - tx) * ty
+            + v(i0 + 1, j0 + 1) * tx * ty
+    };
+    // March the interpolated field on a fine grid: the resulting
+    // polyline is the field's true zero contour, and it is smooth,
+    // because the segments are a fraction of a cell long.
+    let m = 12usize; // subdivisions per cell
+    let step = 1.0 / m as f64;
     ctx.no_fill().stroke(Color::rgb(239, 68, 68)).stroke_width(8.0);
-    for j in 0..N - 1 {
-        for i in 0..N - 1 {
+    for gj in 0..(N - 1) * m {
+        for gi in 0..(N - 1) * m {
+            let (f0, f1) = (gi as f64 * step, (gi + 1) as f64 * step);
+            let (g0, g1) = (gj as f64 * step, (gj + 1) as f64 * step);
             let corners = [
-                (i, j, at(px0 + i, py0 + j)),
-                (i + 1, j, at(px0 + i + 1, py0 + j)),
-                (i + 1, j + 1, at(px0 + i + 1, py0 + j + 1)),
-                (i, j + 1, at(px0 + i, py0 + j + 1)),
+                (f0, g0, val(f0, g0)),
+                (f1, g0, val(f1, g0)),
+                (f1, g1, val(f1, g1)),
+                (f0, g1, val(f0, g1)),
             ];
             let mut pts: Vec<(f64, f64)> = Vec::new();
             for e in 0..4 {
                 let (ia, ja, va) = corners[e];
                 let (ib, jb, vb) = corners[(e + 1) % 4];
-                let (va, vb) = (va as f64 - 128.0, vb as f64 - 128.0);
                 if (va >= 0.0) != (vb >= 0.0) {
                     let t = va / (va - vb);
-                    let fi = ia as f64 + (ib as f64 - ia as f64) * t;
-                    let fj = ja as f64 + (jb as f64 - ja as f64) * t;
-                    pts.push(pos(fi, fj));
+                    pts.push(pos(ia + (ib - ia) * t, ja + (jb - ja) * t));
                 }
             }
             if pts.len() == 2 {
