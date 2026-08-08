@@ -322,19 +322,20 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
             char_base += 1;
             continue;
         }
-        // layout, then apply dragged-node offsets cumulatively: an
-        // offset at cluster k moves k and every cluster after it,
-        // because the chain is relative. Placement anchors on the
-        // UNOFFSET ink, so a drag moves letters on screen instead of
-        // being cancelled by the pen re-anchoring.
+        // layout, then apply dragged-node offsets. An offset at node
+        // i moves exactly one cluster: the one that ENDS at i, which
+        // is the letter the caret hint outlines (the caret at i sits
+        // after letter i-1). Placement anchors on the UNOFFSET ink,
+        // so a drag moves the letter on screen instead of being
+        // cancelled by the pen re-anchoring.
         let clusters = field_text::layout_word(f, word);
         let mut ci = 0usize;
         let mut has_off = false;
         for c in &clusters {
+            ci += c.letters.chars().count();
             if offsets.contains_key(&(char_base + ci)) {
                 has_off = true;
             }
-            ci += c.letters.chars().count();
         }
         let base_wf = field_text::compose_clusters(f, clusters.clone(), None);
         if base_wf.w == 0 {
@@ -389,16 +390,13 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
         let entry_y = base_wf.y0 + if yn_r > 0 { ysum_r / yn_r as f64 } else { 0.0 };
         let wf = if has_off {
             let mut moved = clusters;
-            let mut cum = (0.0f64, 0.0f64);
             let mut ci = 0usize;
             for c in moved.iter_mut() {
-                if let Some(&(dx, dy)) = offsets.get(&(char_base + ci)) {
-                    cum.0 += dx;
-                    cum.1 += dy;
-                }
-                c.ox += cum.0;
-                c.oy += cum.1;
                 ci += c.letters.chars().count();
+                if let Some(&(dx, dy)) = offsets.get(&(char_base + ci)) {
+                    c.ox += dx;
+                    c.oy += dy;
+                }
             }
             field_text::compose_clusters(f, moved, None)
         } else {
