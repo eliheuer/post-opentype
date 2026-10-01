@@ -323,11 +323,11 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
             continue;
         }
         // layout, then apply dragged-node offsets. An offset at node
-        // i moves exactly one cluster: the one that ENDS at i, which
-        // is the letter the caret hint outlines (the caret at i sits
-        // after letter i-1). Placement anchors on the UNOFFSET ink,
-        // so a drag moves the letter on screen instead of being
-        // cancelled by the pen re-anchoring.
+        // i belongs to the cluster that ENDS at i, which is the
+        // letter the caret hint outlines (the caret at i sits after
+        // letter i-1). Placement anchors on the UNOFFSET ink, so a
+        // drag moves the letter on screen instead of being cancelled
+        // by the pen re-anchoring.
         let clusters = field_text::layout_word(f, word);
         let mut ci = 0usize;
         let mut has_off = false;
@@ -337,6 +337,9 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
                 has_off = true;
             }
         }
+        // total sideways pull in this word: the words after it move
+        // over by the same amount, so a stretched word makes room
+        let mut pulled_x = 0.0f64;
         let base_wf = field_text::compose_clusters(f, clusters.clone(), None);
         if base_wf.w == 0 {
             char_base += n_chars + 1;
@@ -389,16 +392,18 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
         }
         let entry_y = base_wf.y0 + if yn_r > 0 { ysum_r / yn_r as f64 } else { 0.0 };
         let wf = if has_off {
-            let mut moved = clusters;
+            // A dragged node pulls its letter and the rest of the
+            // word after it; the join before it stretches to follow.
+            let mut pulls = vec![(0.0, 0.0); clusters.len()];
             let mut ci = 0usize;
-            for c in moved.iter_mut() {
+            for (k, c) in clusters.iter().enumerate() {
                 ci += c.letters.chars().count();
-                if let Some(&(dx, dy)) = offsets.get(&(char_base + ci)) {
-                    c.ox += dx;
-                    c.oy += dy;
+                if let Some(&off) = offsets.get(&(char_base + ci)) {
+                    pulls[k] = off;
+                    pulled_x += off.0;
                 }
             }
-            field_text::compose_clusters(f, moved, None)
+            field_text::compose_clusters_pulled(f, clusters, &pulls)
         } else {
             base_wf
         };
@@ -413,7 +418,7 @@ fn build_field_line(f: &FieldFont, text: &str, offsets: &NodeOffsets) -> FieldLi
             y_min = y_min.min(wf.y0 + ry0 as f64);
             y_max = y_max.max(wf.y0 + ry1 as f64 + 1.0);
         }
-        pen_right -= (ink_r - ink_l) + space;
+        pen_right -= (ink_r - ink_l) + space - pulled_x.min(0.0);
         words.push(PlacedWord {
             wf,
             dx,

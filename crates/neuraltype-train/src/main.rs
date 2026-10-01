@@ -312,16 +312,16 @@ fn main() -> candle_core::Result<()> {
     // epoch; the validation split is untouched.
     let os: usize =
         std::env::var("NTF_OVERSAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let lig = ds.vocab.iter().position(|s| s == "\u{644}\u{644}\u{647}").map(|i| i as u32);
+    let long: Vec<usize> = train_idx
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let f = ds.feats[i];
+            (f[0] != 0 && f[3] != 0) || (f[1] != 0 && f[4] != 0) || Some(f[2]) == lig
+        })
+        .collect();
     if os > 1 {
-        let lig = ds.vocab.iter().position(|s| s == "\u{644}\u{644}\u{647}").map(|i| i as u32);
-        let long: Vec<usize> = train_idx
-            .iter()
-            .copied()
-            .filter(|&i| {
-                let f = ds.feats[i];
-                (f[0] != 0 && f[3] != 0) || (f[1] != 0 && f[4] != 0) || Some(f[2]) == lig
-            })
-            .collect();
         println!("oversampling {} long-word rows x{os}", long.len());
         for _ in 1..os {
             train_idx.extend_from_slice(&long);
@@ -403,7 +403,10 @@ fn main() -> candle_core::Result<()> {
     let replay = envd("NTF_REPLAY", 0);
     let hand_os = envd("NTF_HAND_OS", 1);
     if !hand_idx.is_empty() {
-        println!("labeled rows x{hand_os} per epoch, teacher replay {replay}");
+        println!(
+            "labeled rows x{hand_os} per epoch, teacher replay {replay} + {} long-word rows",
+            long.len()
+        );
     }
     let mut order: Vec<usize> = Vec::new();
     let mut rng_state = 0x9e3779b97f4a7c15u64;
@@ -421,6 +424,11 @@ fn main() -> candle_core::Result<()> {
         order.clear();
         let take = if replay == 0 { train_idx.len() } else { replay.min(train_idx.len()) };
         order.extend_from_slice(&train_idx[..take]);
+        if replay != 0 {
+            // A replay sample would almost never draw the long-word
+            // rows, and they are the first thing the model forgets.
+            order.extend_from_slice(&long);
+        }
         for _ in 0..hand_os {
             order.extend_from_slice(&hand_idx);
         }

@@ -377,3 +377,151 @@ pub fn trace_field(grid: &[f32], w: usize, h: usize) -> BezPath {
     }
     path
 }
+
+/// Compose a word with some clusters pulled away from their default
+/// places. `pulls[k]` moves cluster `k`, and every cluster after it,
+/// by that much (font units, y up) relative to cluster `k - 1`. Where
+/// the two clusters join, the ink between them stretches to follow
+/// (see `stretch`); where they do not touch, the cluster just moves.
+pub fn compose_word_pulled(font: &FieldFont, word: &str, pulls: &[(f64, f64)]) -> WordField {
+    let scale = font.canvas.em_px / font.canvas.upm;
+    let px: Vec<(f64, f64)> = pulls.iter().map(|&(dx, dy)| (dx * scale, -dy * scale)).collect();
+    compose_clusters_pulled(font, layout_word(font, word), &px)
+}
+
+/// `compose_word_pulled` on clusters already laid out, with the pulls
+/// in field pixels (y down), as a dragged node reports them.
+pub fn compose_clusters_pulled(
+    font: &FieldFont,
+    mut clusters: Vec<Cluster>,
+    pulls: &[(f64, f64)],
+) -> WordField {
+    use crate::stretch::{join, warp, Pull, ZONE_EM};
+    let (w, h) = (font.canvas.w, font.canvas.h);
+    let zone = ZONE_EM * font.canvas.em_px as f32;
+    let reach = (crate::stretch::REACH_EM * font.canvas.em_px as f32) as usize;
+    let band = crate::stretch::BAND_EM * font.canvas.em_px as f32;
+    let n = clusters.len();
+    // Fields composite at whole pixels. Two clusters draw the same
+    // stretched stroke, each in its own frame, so both must agree on
+    // where they sit to the pixel: snap the origins and the pulls.
+    let (cox, coy) = (font.canvas.origin_x, font.canvas.origin_y);
+    for c in clusters.iter_mut() {
+        c.ox = (c.ox - cox).round() + cox;
+        c.oy = (c.oy - coy).round() + coy;
+    }
+    let raw = |k: usize| -> (f32, f32) {
+        let (dx, dy) = pulls.get(k).copied().unwrap_or((0.0, 0.0));
+        (dx.round() as f32, dy.round() as f32)
+    };
+    // Joins at the default layout: joins[k] is between k-1 and k, in
+    // cluster k-1's frame and in cluster k's frame.
+    let base: Vec<std::rc::Rc<crate::field_model::GlyphField>> =
+        clusters.iter().map(|c| font.glyph(c.feats)).collect();
+    let mut joins: Vec<Option<((f32, f32), (f32, f32), f32)>> = vec![None; n];
+    let mut src: Vec<Vec<f32>> = base.iter().map(|g| g.field.clone()).collect();
+    for k in 1..n {
+        let dx = (clusters[k].ox - clusters[k - 1].ox).round() as i64;
+        let dy = (clusters[k].oy - clusters[k - 1].oy).round() as i64;
+        joins[k] = join(&base[k - 1].field, &base[k].field, w, h, dx, dy, reach)
+            .map(|(x, y, half)| ((x, y), (x - dx as f32, y - dy as f32), half));
+        // The two clusters draw different ink where they overlap.
+        // Give both the union inside the zone, so the stretched
+        // stroke is the same from either side.
+        if let Some(((jx, jy), _, _)) = joins[k] {
+            let (x0, x1) = ((jx - zone - 2.0).floor() as i64, (jx + zone + 2.0).ceil() as i64);
+            let (y0, y1) = ((jy - 1.5 * band).floor() as i64, (jy + 1.5 * band).ceil() as i64);
+            for y in y0.max(0)..=y1.min(h as i64 - 1) {
+                for x in x0.max(0)..=x1.min(w as i64 - 1) {
+                    let (bx, by) = (x - dx, y - dy);
+                    if bx < 0 || by < 0 || bx >= w as i64 || by >= h as i64 {
+                        continue;
+                    }
+                    let (ia, ib) = (y as usize * w + x as usize, by as usize * w + bx as usize);
+                    let m = base[k - 1].field[ia].max(base[k].field[ib]);
+                    src[k - 1][ia] = m;
+                    src[k][ib] = m;
+                }
+            }
+        }
+    }
+    // A join can stretch a long way but cannot be pushed together
+    // past the zone: the ink would fold over itself.
+    let pull_px = |k: usize| -> (f32, f32) {
+        let (dx, dy) = raw(k);
+        if joins.get(k).copied().flatten().is_some() {
+            (dx.min(zone * 0.6), dy)
+        } else {
+            (dx, dy)
+        }
+    };
+    let mut fields: Vec<Vec<f32>> = Vec::with_capacity(n);
+    for k in 0..n {
+        let half = |j: Option<((f32, f32), (f32, f32), f32)>| j.map_or(0.0, |j| j.2);
+        let prev = Pull { at: joins[k].map(|j| j.1), half: half(joins[k]), d: pull_px(k) };
+        let next = if k + 1 < n {
+            Pull { at: joins[k + 1].map(|j| j.0), half: half(joins[k + 1]), d: pull_px(k + 1) }
+        } else {
+            Pull::default()
+        };
+        fields.push(warp(
+            &src[k],
+            w,
+            h,
+            prev,
+            next,
+            zone,
+            band,
+            font.canvas.em_px as f32,
+            font.canvas.spread_px as f32,
+        ));
+    }
+    // Moved origins: each pull carries the rest of the word with it.
+    let (mut sx, mut sy) = (0.0f64, 0.0f64);
+    for (k, c) in clusters.iter_mut().enumerate() {
+        let (px, py) = pull_px(k);
+        sx += px as f64;
+        sy += py as f64;
+        c.ox += sx;
+        c.oy += sy;
+    }
+    compose_fields(font, clusters, &fields)
+}
+
+/// Composite explicit per-cluster fields at the clusters' origins.
+pub fn compose_fields(font: &FieldFont, clusters: Vec<Cluster>, fields: &[Vec<f32>]) -> WordField {
+    let (cw, ch) = (font.canvas.w, font.canvas.h);
+    let (cox, coy) = (font.canvas.origin_x, font.canvas.origin_y);
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for c in clusters.iter().filter(|c| c.letters != " ") {
+        x0 = x0.min(c.ox - cox);
+        y0 = y0.min(c.oy - coy);
+        x1 = x1.max(c.ox - cox + cw as f64);
+        y1 = y1.max(c.oy - coy + ch as f64);
+    }
+    if x0 == f64::MAX {
+        return WordField { grid: vec![], w: 0, h: 0, x0: 0.0, y0: 0.0, clusters };
+    }
+    let w = (x1 - x0).ceil() as usize + 1;
+    let h = (y1 - y0).ceil() as usize + 1;
+    let mut grid = vec![-1.0f32; w * h];
+    for (c, field) in clusters.iter().zip(fields).filter(|(c, _)| c.letters != " ") {
+        let bx = (c.ox - cox - x0).round() as i64;
+        let by = (c.oy - coy - y0).round() as i64;
+        for y in 0..ch {
+            let ty = by + y as i64;
+            if ty < 0 || ty as usize >= h {
+                continue;
+            }
+            for x in 0..cw {
+                let tx = bx + x as i64;
+                if tx < 0 || tx as usize >= w {
+                    continue;
+                }
+                let cell = &mut grid[ty as usize * w + tx as usize];
+                *cell = cell.max(field[y * cw + x]);
+            }
+        }
+    }
+    WordField { grid, w, h, x0, y0, clusters }
+}

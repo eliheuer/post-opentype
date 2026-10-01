@@ -146,6 +146,14 @@ fn main() {
             args.get(4).expect("out path"),
             args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1.0),
         ),
+        Some("pulled") => pulled(
+            args.get(1).expect("usage: distill pulled <font.ntf> <word> <cluster> <dx> <dy> <out.rgba>"),
+            args.get(2).expect("word"),
+            args.get(3).and_then(|s| s.parse().ok()).expect("cluster index"),
+            args.get(4).and_then(|s| s.parse().ok()).expect("dx"),
+            args.get(5).and_then(|s| s.parse().ok()).expect("dy"),
+            args.get(6).expect("out path"),
+        ),
         Some("faces") => hand::faces(args.get(1).expect("usage: distill faces <font>")),
         _ => eprintln!("usage: distill extract|stats|fields|proof|hand|handproof|standin|faces ..."),
     }
@@ -209,6 +217,36 @@ fn renderword2(ntf: &str, word: &str, out: &str) {
     let placed: Vec<(kurbo::BezPath, f64, f64)> = vec![(path, 0.0, 0.0)];
     let scale = uh as f64 / opts.em_height;
     let grid = fields::rasterize(&placed, uw, uh, scale, 0.0, opts.em_height);
+    let mut rgba = vec![0u8; uw * uh * 4];
+    for (i, &on) in grid.iter().enumerate() {
+        if on {
+            rgba[i * 4..i * 4 + 4].copy_from_slice(&[42, 163, 95, 255]);
+        }
+    }
+    std::fs::write(out, &rgba).unwrap();
+    println!("{uw} {uh}");
+}
+
+/// Render one word with cluster `k` (and the rest of the word after
+/// it) pulled by (dx, dy) font units, through the img2bez field
+/// tracer. Writes RGBA, prints "W H".
+fn pulled(ntf: &str, word: &str, k: usize, dx: f64, dy: f64, out: &str) {
+    use neuraltype_core::{field_model::FieldFont, field_text};
+    let font = FieldFont::load(&std::fs::read(ntf).expect("ntf")).expect("field font");
+    let mut pulls = vec![(0.0, 0.0); k + 1];
+    pulls[k] = (dx, dy);
+    let wf = field_text::compose_word_pulled(&font, word, &pulls);
+    let s = ((1024.0 / wf.h as f64).ceil() as usize).clamp(4, 16);
+    let (uw, uh) = (wf.w * s, wf.h * s);
+    let mut opts = img2bez::TraceOptions::for_profile(img2bez::Profile::Clean);
+    opts.rtl_start = true;
+    opts.faithful = true;
+    opts.fit_accuracy = 0.8;
+    opts.mode = img2bez::TraceMode::SmoothG2;
+    let outline = img2bez::trace_sdf(wf.w, wf.h, &wf.grid, s, &opts).expect("trace_sdf");
+    let path = kurbo::BezPath::from_svg(&outline.to_svg_path()).expect("svg parse");
+    let scale = uh as f64 / opts.em_height;
+    let grid = fields::rasterize(&[(path, 0.0, 0.0)], uw, uh, scale, 0.0, opts.em_height);
     let mut rgba = vec![0u8; uw * uh * 4];
     for (i, &on) in grid.iter().enumerate() {
         if on {

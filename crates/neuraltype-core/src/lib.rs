@@ -16,6 +16,7 @@ pub mod field_text;
 pub mod font;
 pub mod model;
 pub mod shape;
+pub mod stretch;
 pub mod trace;
 pub mod vector_model;
 
