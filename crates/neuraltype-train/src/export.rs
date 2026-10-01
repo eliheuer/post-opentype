@@ -63,7 +63,7 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
         blob.extend_from_slice(t.data());
     }
 
-    let header = serde_json::json!({
+    let mut header = serde_json::json!({
         "license": "OFL-1.1",
         "notice": "Derived from Gulzar (Copyright 2021 The Gulzar Project Authors, https://github.com/simoncozens/Gulzar), licensed under the SIL Open Font License 1.1.",
         "format": "neuraltype-field-v1",
@@ -87,6 +87,14 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
         },
         "tensors": tensors_meta,
     });
+    // Optional per-dataset header fields (license, notice, space_ctx,
+    // ...): a font built from labeled phrases is not only Gulzar.
+    if let Ok(extra) = std::fs::read_to_string(format!("{fields_dir}/header-extra.json")) {
+        let extra: serde_json::Value = serde_json::from_str(&extra).unwrap();
+        for (k, v) in extra.as_object().unwrap() {
+            header[k] = v.clone();
+        }
+    }
     let mut hjson = serde_json::to_vec(&header).unwrap();
     while (8 + hjson.len()) % 4 != 0 {
         hjson.push(b' ');

@@ -19,25 +19,7 @@ pub struct Cluster {
 /// Segment a word's chars into clusters (لا fuses) and build the
 /// (prev2, prev, letter, next, next2) feature tuple for each.
 pub fn word_clusters(font: &FieldFont, chars: &[char]) -> Vec<(String, [u32; 5])> {
-    // cluster char ranges
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
-    if chars == ['\u{627}', '\u{644}', '\u{644}', '\u{647}'] {
-        // Gulzar ligates لله after the alif in the word الله: harfbuzz
-        // shapes it as [ا][لله]. Match the teacher's clustering.
-        ranges.push((0, 1));
-        ranges.push((1, 4));
-    } else {
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] == 'ل' && i + 1 < chars.len() && chars[i + 1] == 'ا' {
-                ranges.push((i, i + 2));
-                i += 2;
-            } else {
-                ranges.push((i, i + 1));
-                i += 1;
-            }
-        }
-    }
+    let ranges = cluster_ranges(chars);
     let none = font.none_id();
     let id_char = |c: Option<char>| -> u32 {
         c.and_then(|c| font.vocab_id(&c.to_string())).unwrap_or(none)
@@ -56,6 +38,30 @@ pub fn word_clusters(font: &FieldFont, chars: &[char]) -> Vec<(String, [u32; 5])
             (letters, feats)
         })
         .collect()
+}
+
+/// The char ranges of a word's clusters. Font-independent, so dataset
+/// builders segment exactly as the engine does.
+pub fn cluster_ranges(chars: &[char]) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    if chars == ['\u{627}', '\u{644}', '\u{644}', '\u{647}'] {
+        // Gulzar ligates لله after the alif in the word الله: harfbuzz
+        // shapes it as [ا][لله]. Match the teacher's clustering.
+        ranges.push((0, 1));
+        ranges.push((1, 4));
+    } else {
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == 'ل' && i + 1 < chars.len() && chars[i + 1] == 'ا' {
+                ranges.push((i, i + 2));
+                i += 2;
+            } else {
+                ranges.push((i, i + 1));
+                i += 1;
+            }
+        }
+    }
+    ranges
 }
 
 /// Lay out one word: run the model per cluster and chain origins.
@@ -100,8 +106,74 @@ pub struct WordField {
 }
 
 pub fn compose_word(font: &FieldFont, word: &str) -> WordField {
-    let clusters = layout_word(font, word);
+    let clusters = if word.contains(' ') {
+        layout_text(font, word).into_iter().next().unwrap_or_default()
+    } else {
+        layout_word(font, word)
+    };
     compose_clusters(font, clusters, None)
+}
+
+/// The feature tuple of a space between two words: the last two
+/// letters before it and the first two after it.
+pub fn space_feats(font: &FieldFont, before: &[char], after: &[char]) -> Option<[u32; 5]> {
+    let sp = font.vocab_id(" ")?;
+    let none = font.none_id();
+    let id = |c: Option<&char>| -> u32 {
+        c.and_then(|c| font.vocab_id(&c.to_string())).unwrap_or(none)
+    };
+    let n = before.len();
+    Some([
+        id(if n >= 2 { before.get(n - 2) } else { None }),
+        id(before.last()),
+        sp,
+        id(after.first()),
+        id(after.get(1)),
+    ])
+}
+
+/// Lay out text that may contain spaces. Words joined by a trained
+/// space (see `FieldFont::space_trained`) form one group in a shared
+/// frame: the space is a cluster whose displacement carries the
+/// next word's first origin, so a traced phrase keeps its
+/// composition. An untrained space starts a new group, which the
+/// caller places as it places words today. A space cluster has the
+/// letters " " and is never drawn.
+pub fn layout_text(font: &FieldFont, text: &str) -> Vec<Vec<Cluster>> {
+    let scale = font.canvas.em_px / font.canvas.upm;
+    let words: Vec<Vec<char>> =
+        text.split(' ').filter(|w| !w.is_empty()).map(|w| w.chars().collect()).collect();
+    let mut groups: Vec<Vec<Cluster>> = Vec::new();
+    for (wi, chars) in words.iter().enumerate() {
+        let word: String = chars.iter().collect();
+        let mut cl = layout_word(font, &word);
+        let chained = wi > 0
+            && space_feats(font, &words[wi - 1], chars)
+                .filter(|f| font.space_trained([f[0], f[1], f[3], f[4]]))
+                .map(|f| {
+                    let g = font.glyph(f);
+                    let group = groups.last_mut().unwrap();
+                    let last = group.last().unwrap();
+                    // the space sits at the previous origin; the next
+                    // word's first origin is that plus its displacement
+                    let (sx, sy) = (last.ox, last.oy);
+                    let (nx, ny) = (sx + g.ddx * scale, sy - g.ddy * scale);
+                    group.push(Cluster { letters: " ".into(), feats: f, ox: sx, oy: sy });
+                    if let Some(first) = cl.first() {
+                        let (dx, dy) = (nx - first.ox, ny - first.oy);
+                        for c in cl.iter_mut() {
+                            c.ox += dx;
+                            c.oy += dy;
+                        }
+                    }
+                    group.extend(cl.drain(..));
+                })
+                .is_some();
+        if !chained {
+            groups.push(cl);
+        }
+    }
+    groups
 }
 
 /// Compose a word's clusters into one field. `mask` selects a subset
@@ -112,7 +184,9 @@ pub fn compose_clusters(
     clusters: Vec<Cluster>,
     mask: Option<&[bool]>,
 ) -> WordField {
-    let included = |k: usize| mask.map_or(true, |m| m.get(k).copied().unwrap_or(false));
+    let included = |k: usize| {
+        clusters[k].letters != " " && mask.map_or(true, |m| m.get(k).copied().unwrap_or(false))
+    };
     let (cw, ch) = (font.canvas.w as f64, font.canvas.h as f64);
     let (cox, coy) = (font.canvas.origin_x, font.canvas.origin_y);
     // extents

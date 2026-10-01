@@ -36,6 +36,10 @@ struct Row {
     shape: usize,
     ddx: Option<i32>,
     ddy: Option<i32>,
+    /// Priority. Rows from a designer's labeled phrases carry 1 and
+    /// replace teacher rows (0) that share their context.
+    #[serde(default)]
+    pri: u8,
 }
 
 struct Dataset {
@@ -44,6 +48,8 @@ struct Dataset {
     shape_ids: Vec<usize>,
     /// Displacement targets in em units; NaN when absent.
     disp: Vec<[f32; 2]>,
+    /// True for rows that came from labeled phrases (pri > 0).
+    hand: Vec<bool>,
     vocab: Vec<String>,
     fields: Vec<u8>,
     w: usize,
@@ -86,6 +92,10 @@ fn load(fields_dir: &str) -> Dataset {
         shapes: HashMap<usize, usize>,
         dsum: [f64; 2],
         dn: usize,
+        pri: u8,
+        /// Row order of the first occurrence, so the tuple list is
+        /// deterministic.
+        first: usize,
     }
     let mut by_feat: HashMap<[u32; 5], Acc> = HashMap::new();
     let text = std::fs::read_to_string(format!("{fields_dir}/dataset.jsonl")).unwrap();
@@ -98,7 +108,19 @@ fn load(fields_dir: &str) -> Dataset {
             r.next.map_or(0, |c| id_of(c.to_string(), &mut vocab, &mut vocab_map)),
             r.next2.map_or(0, |c| id_of(c.to_string(), &mut vocab, &mut vocab_map)),
         ];
-        let acc = by_feat.entry(f).or_default();
+        let n_seen = by_feat.len();
+        let acc = by_feat.entry(f).or_insert_with(|| Acc { first: n_seen, ..Default::default() });
+        if r.pri < acc.pri {
+            continue;
+        }
+        if r.pri > acc.pri {
+            // a labeled row replaces every teacher row for its context
+            *acc = Acc { pri: r.pri, first: acc.first, ..Default::default() };
+        } else if r.pri > 0 {
+            // a later labeled instance of the same context: the first
+            // one stands, no modal vote and no averaged displacement
+            continue;
+        }
         *acc.shapes.entry(r.shape).or_default() += 1;
         if let (Some(dx), Some(dy)) = (r.ddx, r.ddy) {
             acc.dsum[0] += dx as f64 / upm as f64;
@@ -118,7 +140,11 @@ fn load(fields_dir: &str) -> Dataset {
     let mut feats = Vec::new();
     let mut shape_ids = Vec::new();
     let mut disp = Vec::new();
-    for (f, acc) in by_feat {
+    let mut hand = Vec::new();
+    let mut tuples: Vec<([u32; 5], Acc)> = by_feat.into_iter().collect();
+    tuples.sort_by_key(|(_, a)| a.first);
+    for (f, acc) in tuples {
+        hand.push(acc.pri > 0);
         let modal = acc.shapes.iter().max_by_key(|(_, n)| **n).unwrap().0;
         feats.push(f);
         shape_ids.push(*modal);
@@ -131,7 +157,7 @@ fn load(fields_dir: &str) -> Dataset {
             disp.push([f32::NAN, f32::NAN]);
         }
     }
-    Dataset { feats, shape_ids, disp, vocab, fields, w, h, n_shapes }
+    Dataset { feats, shape_ids, disp, hand, vocab, fields, w, h, n_shapes }
 }
 
 struct Model {
@@ -271,10 +297,12 @@ fn main() -> candle_core::Result<()> {
     let fields_f32: Vec<f32> = ds.fields.iter().map(|&v| (v as f32 - 128.0) / 127.0).collect();
     let fields_t = Tensor::from_vec(fields_f32, (ds.n_shapes, h * w), &device)?;
 
-    // Deterministic split: every 20th row is validation.
-    let val_idx: Vec<usize> = (0..n).filter(|i| i % 20 == 0).collect();
-    let mut train_idx: Vec<usize> = (0..n).filter(|i| i % 20 != 0).collect();
-    println!("rows: {} train, {} val", train_idx.len(), val_idx.len());
+    // Deterministic split: every 20th teacher row is validation.
+    // Labeled rows always train: there are too few to hold any out.
+    let val_idx: Vec<usize> = (0..n).filter(|&i| i % 20 == 0 && !ds.hand[i]).collect();
+    let mut train_idx: Vec<usize> = (0..n).filter(|&i| i % 20 != 0 && !ds.hand[i]).collect();
+    let hand_idx: Vec<usize> = (0..n).filter(|&i| ds.hand[i]).collect();
+    println!("rows: {} train, {} val, {} labeled", train_idx.len(), val_idx.len(), hand_idx.len());
 
     // Oversample the long-word rows. A context window that spans
     // four or more letters cannot come from the combinatorial corpus
@@ -300,6 +328,17 @@ fn main() -> candle_core::Result<()> {
         }
     }
 
+    // A resumed run must keep the token ids its checkpoint was
+    // trained with: the old vocabulary has to be a prefix of the new.
+    if let Ok(old) = std::fs::read_to_string(format!("{out_dir}/vocab.json")) {
+        let old: Vec<String> = serde_json::from_str(&old).unwrap();
+        assert!(
+            ds.vocab.len() >= old.len() && ds.vocab[..old.len()] == old[..],
+            "dataset vocabulary does not extend the checkpoint's: {:?} vs {:?}",
+            ds.vocab,
+            old
+        );
+    }
     // Persist the vocabulary up front so mid-training checkpoints can
     // be exported.
     std::fs::write(
@@ -350,10 +389,23 @@ fn main() -> candle_core::Result<()> {
         )
     };
 
-    let bs: usize =
-        std::env::var("NTF_bs").ok().and_then(|v| v.parse().ok()).unwrap_or(128);
+    // NTF_BS is the documented name; NTF_bs is what older runs set.
+    let bs: usize = std::env::var("NTF_BS")
+        .or_else(|_| std::env::var("NTF_bs"))
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
     println!("batch size: {bs}");
-    let mut order: Vec<usize> = train_idx.clone();
+    // Fine-tuning on labeled phrases: each epoch sees every labeled
+    // row NTF_HAND_OS times plus NTF_REPLAY teacher rows drawn fresh,
+    // so the model keeps the teacher's behavior for all other text.
+    // NTF_REPLAY=0 (default) uses every teacher row each epoch.
+    let replay = envd("NTF_REPLAY", 0);
+    let hand_os = envd("NTF_HAND_OS", 1);
+    if !hand_idx.is_empty() {
+        println!("labeled rows x{hand_os} per epoch, teacher replay {replay}");
+    }
+    let mut order: Vec<usize> = Vec::new();
     let mut rng_state = 0x9e3779b97f4a7c15u64;
     let mut shuffle = |v: &mut Vec<usize>| {
         for i in (1..v.len()).rev() {
@@ -365,6 +417,13 @@ fn main() -> candle_core::Result<()> {
     };
 
     for epoch in 1..=epochs {
+        shuffle(&mut train_idx);
+        order.clear();
+        let take = if replay == 0 { train_idx.len() } else { replay.min(train_idx.len()) };
+        order.extend_from_slice(&train_idx[..take]);
+        for _ in 0..hand_os {
+            order.extend_from_slice(&hand_idx);
+        }
         shuffle(&mut order);
         let mut loss_sum = 0.0f64;
         let mut nb = 0usize;
@@ -396,8 +455,30 @@ fn main() -> candle_core::Result<()> {
             inter += (&pi * &ti)?.sum_all()?.to_scalar::<f32>()? as f64;
             union += (((&pi + &ti)? - (&pi * &ti)?)?).sum_all()?.to_scalar::<f32>()? as f64;
         }
+        // Labeled rows: field IoU and displacement error (font units).
+        let mut hand_note = String::new();
+        if !hand_idx.is_empty() {
+            let (mut hi, mut hu, mut de, mut dn) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            for chunk in hand_idx.chunks(bs) {
+                let feats = feats_of(chunk)?;
+                let target = targets_of(chunk)?;
+                let (dtgt, dmask) = disp_of(chunk);
+                let (pred, dpred) = model.forward(&feats)?;
+                let pi = pred.ge(0.0)?.to_dtype(DType::F32)?;
+                let ti = target.ge(0.0)?.to_dtype(DType::F32)?;
+                hi += (&pi * &ti)?.sum_all()?.to_scalar::<f32>()? as f64;
+                hu += (((&pi + &ti)? - (&pi * &ti)?)?).sum_all()?.to_scalar::<f32>()? as f64;
+                de += ((dpred.sub(&dtgt))?.abs()? * &dmask)?.sum_all()?.to_scalar::<f32>()? as f64;
+                dn += dmask.sum_all()?.to_scalar::<f32>()? as f64;
+            }
+            hand_note = format!(
+                "  labeled IoU {:.4}  disp err {:.1}u",
+                hi / hu.max(1.0),
+                1000.0 * de / dn.max(1.0)
+            );
+        }
         println!(
-            "epoch {epoch:3}  train loss {:.5}  val mse {:.5}  val IoU {:.4}  ({:.0}s)",
+            "epoch {epoch:3}  train loss {:.5}  val mse {:.5}  val IoU {:.4}{hand_note}  ({:.0}s)",
             loss_sum / nb as f64,
             vmse / val_idx.len() as f64,
             inter / union,

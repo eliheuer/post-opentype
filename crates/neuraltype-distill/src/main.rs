@@ -12,6 +12,11 @@
 //!   distill stats <out-dir>                summarize an extracted dataset
 //!   distill fields <extract-dir> <out-dir> [em_px]   render SDF fields
 //!   distill proof <fields-dir> <out.pgm> [ids...]    field proof sheet
+//!   distill hand <base-fields-dir> <out-fields-dir> <phrase.json>...
+//!                                          append labeled phrases to a dataset
+//!   distill handproof <phrase.json> <out.pgm> [em_px]  render a phrase file's ink
+//!   distill standin <font> <face> <text> <out.json> [size]
+//!                                          a phrase file from any font, for tests
 //!
 //! Output files (JSONL, one record per line, inspectable with jq):
 //!   meta.json      font name, upm, corpus and dedup counts
@@ -21,6 +26,7 @@
 mod cascade;
 mod compare;
 mod fields;
+mod hand;
 
 use neuraltype_core::art::letter_of_char;
 use serde::{Deserialize, Serialize};
@@ -123,7 +129,25 @@ fn main() {
             args.get(2).expect("usage: distill proof <fields-dir> <out.pgm> [ids...]"),
             &args[3..].iter().filter_map(|s| s.parse().ok()).collect::<Vec<usize>>(),
         ),
-        _ => eprintln!("usage: distill extract|stats|fields|proof ..."),
+        Some("hand") => hand::hand(
+            args.get(1).expect("usage: distill hand <base-fields-dir> <out-fields-dir> <phrase.json>..."),
+            args.get(2).expect("out fields dir"),
+            &args[3..],
+        ),
+        Some("handproof") => hand::proof(
+            args.get(1).expect("usage: distill handproof <phrase.json> <out.pgm> [em_px]"),
+            args.get(2).expect("out path"),
+            args.get(3).and_then(|s| s.parse().ok()).unwrap_or(64.0),
+        ),
+        Some("standin") => hand::standin(
+            args.get(1).expect("usage: distill standin <font> <face-index> <text> <out.json> [size]"),
+            args.get(2).and_then(|s| s.parse().ok()).expect("face index"),
+            args.get(3).expect("text"),
+            args.get(4).expect("out path"),
+            args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1.0),
+        ),
+        Some("faces") => hand::faces(args.get(1).expect("usage: distill faces <font>")),
+        _ => eprintln!("usage: distill extract|stats|fields|proof|hand|handproof|standin|faces ..."),
     }
 }
 

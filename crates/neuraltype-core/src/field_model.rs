@@ -44,6 +44,12 @@ struct Header {
     arch: Arch,
     canvas: Canvas,
     tensors: Vec<TensorMeta>,
+    /// Space contexts the font was trained on, as
+    /// [prev2, prev, next, next2] ("" = none). A space in one of
+    /// these contexts chains the next word to the previous one (a
+    /// composed phrase); any other space is an ordinary word break.
+    #[serde(default)]
+    space_ctx: Vec<[String; 4]>,
 }
 
 struct Tensor {
@@ -56,6 +62,7 @@ pub struct FieldFont {
     arch: Arch,
     pub canvas: Canvas,
     t: HashMap<String, Tensor>,
+    space_ctx: std::collections::HashSet<[u32; 4]>,
     cache: std::cell::RefCell<HashMap<[u32; 5], std::rc::Rc<GlyphField>>>,
 }
 
@@ -105,14 +112,23 @@ impl FieldFont {
             t.insert(tm.name.clone(), Tensor { shape: tm.shape.clone(), data });
             off = end;
         }
-        let vocab = header
+        let vocab: HashMap<String, u32> = header
             .vocab
             .iter()
             .enumerate()
             .map(|(i, s)| (s.clone(), i as u32))
             .collect();
+        let space_ctx = header
+            .space_ctx
+            .iter()
+            .map(|c| {
+                let id = |s: &String| vocab.get(s).copied().unwrap_or(0);
+                [id(&c[0]), id(&c[1]), id(&c[2]), id(&c[3])]
+            })
+            .collect();
         Ok(FieldFont {
             vocab,
+            space_ctx,
             arch: header.arch,
             canvas: header.canvas,
             t,
@@ -137,6 +153,12 @@ impl FieldFont {
 
     pub fn none_id(&self) -> u32 {
         0
+    }
+
+    /// Whether a space with these neighbors ([prev2, prev, next,
+    /// next2] vocab ids) was trained as part of a composed phrase.
+    pub fn space_trained(&self, ctx: [u32; 4]) -> bool {
+        self.space_ctx.contains(&ctx)
     }
 
     /// One forward pass for one letter-in-context (cached).

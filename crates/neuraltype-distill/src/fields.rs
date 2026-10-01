@@ -250,6 +250,35 @@ fn edt(grid: &[bool], w: usize, h: usize) -> Vec<f64> {
     d
 }
 
+/// One stored field from a supersampled ink grid (`w*ss` by `h*ss`):
+/// signed distance in target pixels, positive inside, clamped at
+/// `spread_px`, as u8 with 128 on the contour.
+pub fn sdf_from_grid(grid: &[bool], w: usize, h: usize, ss: usize, spread_px: f64) -> Vec<u8> {
+    let (sw, sh) = (w * ss, h * ss);
+    let mut out = Vec::with_capacity(w * h);
+    if !grid.iter().any(|&b| b) {
+        // no ink: everything is far outside
+        out.resize(w * h, 1u8);
+        return out;
+    }
+    // signed distance: outside dist − inside dist, in target pixels
+    let inv: Vec<bool> = grid.iter().map(|b| !b).collect();
+    let d_out = edt(grid, sw, sh); // distance to figure (for ground cells)
+    let d_in = edt(&inv, sw, sh); // distance to ground (for figure cells)
+    for row in 0..h {
+        for col in 0..w {
+            // sample the supersampled center
+            let sy = row * ss + ss / 2;
+            let sx = col * ss + ss / 2;
+            let i = sy * sw + sx;
+            let sd = if grid[i] { d_in[i] } else { -d_out[i] } / ss as f64;
+            let v = (sd / spread_px).clamp(-1.0, 1.0);
+            out.push(((v * 127.0) + 128.0) as u8);
+        }
+    }
+    out
+}
+
 pub fn fields(extract_dir: &str, out_dir: &str, em_px: u32) {
     let meta: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(format!("{extract_dir}/meta.json")).unwrap(),
@@ -350,21 +379,7 @@ pub fn fields(extract_dir: &str, out_dir: &str, em_px: u32) {
             })
             .collect();
         let grid = rasterize(&paths, sw, sh, px_per_unit * SS as f64, x0, y1);
-        // signed distance: outside dist − inside dist, in target pixels
-        let inv: Vec<bool> = grid.iter().map(|b| !b).collect();
-        let d_out = edt(&grid, sw, sh); // distance to figure (for ground cells)
-        let d_in = edt(&inv, sw, sh); // distance to ground (for figure cells)
-        for row in 0..h {
-            for col in 0..w {
-                // sample the supersampled center
-                let sy = row * SS + SS / 2;
-                let sx = col * SS + SS / 2;
-                let i = sy * sw + sx;
-                let sd = if grid[i] { d_in[i] } else { -d_out[i] } / SS as f64;
-                let v = (sd / spread_px).clamp(-1.0, 1.0);
-                fields_bin.push(((v * 127.0) + 128.0) as u8);
-            }
-        }
+        fields_bin.extend(sdf_from_grid(&grid, w, h, SS, spread_px));
     }
 
     std::fs::write(format!("{out_dir}/fields.bin"), &fields_bin).unwrap();
