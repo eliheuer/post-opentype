@@ -24,6 +24,10 @@ struct Arch {
     kernel: usize,
     stride: usize,
     padding: usize,
+    /// Conditioning inputs after the embeddings: 4 when the font was
+    /// trained to draw pulled clusters (see `stretch`), else 0.
+    #[serde(default)]
+    cond: usize,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +68,8 @@ pub struct FieldFont {
     t: HashMap<String, Tensor>,
     space_ctx: std::collections::HashSet<[u32; 4]>,
     cache: std::cell::RefCell<HashMap<[u32; 5], std::rc::Rc<GlyphField>>>,
+    /// Pulled fields, keyed by context and the pull in whole pixels.
+    pulled_cache: std::cell::RefCell<HashMap<([u32; 5], [i32; 4]), std::rc::Rc<GlyphField>>>,
 }
 
 pub struct GlyphField {
@@ -133,6 +139,7 @@ impl FieldFont {
             canvas: header.canvas,
             t,
             cache: Default::default(),
+            pulled_cache: Default::default(),
         })
     }
 
@@ -166,22 +173,54 @@ impl FieldFont {
         if let Some(g) = self.cache.borrow().get(&feats) {
             return g.clone();
         }
-        let g = std::rc::Rc::new(self.forward(feats));
+        let g = std::rc::Rc::new(self.forward(feats, [0.0; 4]));
         self.cache.borrow_mut().insert(feats, g.clone());
         g
     }
 
-    fn forward(&self, feats: [u32; 5]) -> GlyphField {
+    /// Whether the network takes pulls as inputs (see `stretch`).
+    pub fn learned_stretch(&self) -> bool {
+        self.arch.cond == 4
+    }
+
+    /// One forward pass for a letter whose neighbors are pulled:
+    /// `cond` is [prev x, prev y, next x, next y] in em, y down
+    /// (cached per whole pixel). Without pulls this is `glyph`.
+    pub fn glyph_pulled(&self, feats: [u32; 5], cond: [f32; 4]) -> std::rc::Rc<GlyphField> {
+        if !self.learned_stretch() || cond == [0.0; 4] {
+            return self.glyph(feats);
+        }
+        let em = self.canvas.em_px as f32;
+        let key = (feats, cond.map(|c| (c * em).round() as i32));
+        if let Some(g) = self.pulled_cache.borrow().get(&key) {
+            return g.clone();
+        }
+        let g = std::rc::Rc::new(self.forward(feats, cond));
+        let mut cache = self.pulled_cache.borrow_mut();
+        // a drag visits many pulls; keep the cache from growing forever
+        if cache.len() > 512 {
+            cache.clear();
+        }
+        cache.insert(key, g.clone());
+        g
+    }
+
+    fn forward(&self, feats: [u32; 5], cond: [f32; 4]) -> GlyphField {
         let a = &self.arch;
         let emb = &self.t["emb.weight"];
         // concat embeddings
-        let mut x = Vec::with_capacity(5 * a.emb);
+        let mut x = Vec::with_capacity(5 * a.emb + a.cond);
         for &id in &feats {
             let base = id as usize * a.emb;
             x.extend_from_slice(&emb.data[base..base + a.emb]);
         }
+        x.extend_from_slice(&cond[..a.cond.min(4)]);
         // l1 + relu
-        let z = dense(&x, &self.t["l1.weight"], &self.t["l1.bias"], true);
+        let mut z = dense(&x, &self.t["l1.weight"], &self.t["l1.bias"], true);
+        // optional second hidden layer
+        if let (Some(w), Some(b)) = (self.t.get("l1b.weight"), self.t.get("l1b.bias")) {
+            z = dense(&z, w, b, true);
+        }
         // displacement head (font units)
         let d = dense(&z, &self.t["disp.weight"], &self.t["disp.bias"], false);
         let (ddx, ddy) = (d[0] as f64 * self.canvas.upm, d[1] as f64 * self.canvas.upm);

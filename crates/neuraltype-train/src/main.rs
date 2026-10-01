@@ -40,6 +40,18 @@ struct Row {
     /// replace teacher rows (0) that share their context.
     #[serde(default)]
     pri: u8,
+    /// Cluster index in its word; 0 starts a word.
+    #[serde(default)]
+    index: usize,
+}
+
+/// A neighboring cluster in the word a context was first seen in: its
+/// shape, and its origin relative to this one (whole pixels, y down).
+#[derive(Clone, Copy)]
+struct Nb {
+    shape: usize,
+    dx: i64,
+    dy: i64,
 }
 
 struct Dataset {
@@ -50,6 +62,10 @@ struct Dataset {
     disp: Vec<[f32; 2]>,
     /// True for rows that came from labeled phrases (pri > 0).
     hand: Vec<bool>,
+    /// The clusters before and after, for stretch targets.
+    nb: Vec<[Option<Nb>; 2]>,
+    em_px: f32,
+    spread_px: f32,
     vocab: Vec<String>,
     fields: Vec<u8>,
     w: usize,
@@ -67,6 +83,8 @@ fn load(fields_dir: &str) -> Dataset {
         meta["h"].as_u64().unwrap() as usize,
     );
     let upm = meta["upm"].as_f64().unwrap() as f32;
+    let em_px = meta["em_px"].as_f64().unwrap() as f32;
+    let spread_px = meta["spread_px"].as_f64().unwrap() as f32;
     let n_shapes = meta["shapes"].as_u64().unwrap() as usize;
     let fields = std::fs::read(format!("{fields_dir}/fields.bin")).unwrap();
     assert_eq!(fields.len(), n_shapes * w * h);
@@ -96,9 +114,16 @@ fn load(fields_dir: &str) -> Dataset {
         /// Row order of the first occurrence, so the tuple list is
         /// deterministic.
         first: usize,
+        /// Neighbors (previous, next) of the row that set the shape.
+        nb: [Option<Nb>; 2],
+        /// The shape that row had.
+        nb_shape: Option<usize>,
     }
     let mut by_feat: HashMap<[u32; 5], Acc> = HashMap::new();
     let text = std::fs::read_to_string(format!("{fields_dir}/dataset.jsonl")).unwrap();
+    // the previous line's cluster, when it is in the same word
+    let mut last: Option<([u32; 5], usize)> = None;
+    let px = |units: i32| (units as f32 / upm * em_px).round() as i64;
     for line in text.lines() {
         let r: Row = serde_json::from_str(line).unwrap();
         let f = [
@@ -108,6 +133,11 @@ fn load(fields_dir: &str) -> Dataset {
             r.next.map_or(0, |c| id_of(c.to_string(), &mut vocab, &mut vocab_map)),
             r.next2.map_or(0, |c| id_of(c.to_string(), &mut vocab, &mut vocab_map)),
         ];
+        // Link this cluster to the one before it in the word. Spaces
+        // and word starts break the chain.
+        let is_space = r.letters == " ";
+        let link = if r.index > 0 && !is_space { last } else { None };
+        last = if is_space { None } else { Some((f, r.shape)) };
         let n_seen = by_feat.len();
         let acc = by_feat.entry(f).or_insert_with(|| Acc { first: n_seen, ..Default::default() });
         if r.pri < acc.pri {
@@ -121,6 +151,23 @@ fn load(fields_dir: &str) -> Dataset {
             // one stands, no modal vote and no averaged displacement
             continue;
         }
+        if acc.nb_shape.is_none() {
+            acc.nb_shape = Some(r.shape);
+        }
+        if let (Some((pf, pshape)), Some(dx), Some(dy)) = (link, r.ddx, r.ddy) {
+            // this cluster sits at (dx, -dy) px from the previous one
+            let (dx, dy) = (px(dx), -px(dy));
+            if acc.nb_shape == Some(r.shape) && acc.nb[0].is_none() {
+                acc.nb[0] = Some(Nb { shape: pshape, dx: -dx, dy: -dy });
+            }
+            let shape = r.shape;
+            if let Some(pacc) = by_feat.get_mut(&pf) {
+                if pacc.nb_shape == Some(pshape) && pacc.nb[1].is_none() {
+                    pacc.nb[1] = Some(Nb { shape, dx, dy });
+                }
+            }
+        }
+        let acc = by_feat.get_mut(&f).unwrap();
         *acc.shapes.entry(r.shape).or_default() += 1;
         if let (Some(dx), Some(dy)) = (r.ddx, r.ddy) {
             acc.dsum[0] += dx as f64 / upm as f64;
@@ -141,10 +188,12 @@ fn load(fields_dir: &str) -> Dataset {
     let mut shape_ids = Vec::new();
     let mut disp = Vec::new();
     let mut hand = Vec::new();
+    let mut nb = Vec::new();
     let mut tuples: Vec<([u32; 5], Acc)> = by_feat.into_iter().collect();
     tuples.sort_by_key(|(_, a)| a.first);
     for (f, acc) in tuples {
         hand.push(acc.pri > 0);
+        nb.push(acc.nb);
         let modal = acc.shapes.iter().max_by_key(|(_, n)| **n).unwrap().0;
         feats.push(f);
         shape_ids.push(*modal);
@@ -157,12 +206,14 @@ fn load(fields_dir: &str) -> Dataset {
             disp.push([f32::NAN, f32::NAN]);
         }
     }
-    Dataset { feats, shape_ids, disp, hand, vocab, fields, w, h, n_shapes }
+    Dataset { feats, shape_ids, disp, hand, nb, em_px, spread_px, vocab, fields, w, h, n_shapes }
 }
 
 struct Model {
     emb: candle_nn::Embedding,
     l1: candle_nn::Linear,
+    /// Optional second hidden layer (NTF_DEEP=1).
+    l1b: Option<candle_nn::Linear>,
     l2: candle_nn::Linear,
     disp: candle_nn::Linear,
     deconvs: Vec<candle_nn::ConvTranspose2d>,
@@ -191,6 +242,14 @@ static CHANS: std::sync::LazyLock<Vec<usize>> = std::sync::LazyLock::new(|| {
         .unwrap_or_else(|| vec![128, 64, 32, 16, 8, 1])
 });
 static C0: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| CHANS[0]);
+/// Conditioning inputs after the embeddings: 4 (the pulls on the two
+/// joins, see neuraltype_core::stretch) when NTF_STRETCH is set.
+static COND: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| if envf("NTF_STRETCH", 0.0) > 0.0 { 4 } else { envd("NTF_COND", 0) });
+static DEEP: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| envd("NTF_DEEP", 0) > 0);
+fn envf(name: &str, default: f32) -> f32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
 
 /// Seed grid for the deconvolution stack: each stride-2 layer doubles
 /// it, so the seed is the canvas dims divided by 2^stages, rounded
@@ -204,7 +263,8 @@ impl Model {
     fn new(vb: &VarBuilder, vocab: usize, h: usize, w: usize) -> candle_core::Result<Self> {
         let g0 = grid0_for(h, w);
         let emb = embedding(vocab, *EMB, vb.pp("emb"))?;
-        let l1 = linear(5 * *EMB, *LATENT, vb.pp("l1"))?;
+        let l1 = linear(5 * *EMB + *COND, *LATENT, vb.pp("l1"))?;
+        let l1b = if *DEEP { Some(linear(*LATENT, *LATENT, vb.pp("l1b"))?) } else { None };
         let l2 = linear(*LATENT, *C0 * g0.0 * g0.1, vb.pp("l2"))?;
         let disp = linear(*LATENT, 2, vb.pp("disp"))?;
         let chans = &*CHANS;
@@ -219,14 +279,24 @@ impl Model {
                 vb.pp(format!("d{i}")),
             )?);
         }
-        Ok(Model { emb, l1, l2, disp, deconvs, h, w })
+        Ok(Model { emb, l1, l1b, l2, disp, deconvs, h, w })
     }
 
     /// Returns (field [B,1,h,w], displacement [B,2], latent).
-    fn forward(&self, feats: &Tensor) -> candle_core::Result<(Tensor, Tensor)> {
+    fn forward(&self, feats: &Tensor, cond: Option<&Tensor>) -> candle_core::Result<(Tensor, Tensor)> {
         let b = feats.dim(0)?;
-        let e = self.emb.forward(feats)?.reshape((b, 5 * *EMB))?;
-        let z = self.l1.forward(&e)?.relu()?;
+        let mut e = self.emb.forward(feats)?.reshape((b, 5 * *EMB))?;
+        if *COND > 0 {
+            let c = match cond {
+                Some(c) => c.clone(),
+                None => Tensor::zeros((b, *COND), DType::F32, feats.device())?,
+            };
+            e = Tensor::cat(&[&e, &c], 1)?;
+        }
+        let mut z = self.l1.forward(&e)?.relu()?;
+        if let Some(l) = &self.l1b {
+            z = l.forward(&z)?.relu()?;
+        }
         let disp = self.disp.forward(&z)?;
         let x = self.l2.forward(&z)?.relu()?;
         let g0 = grid0_for(self.h, self.w);
@@ -264,6 +334,35 @@ fn expand_checkpoint_vocab(ckpt: &str, vocab_len: usize) -> candle_core::Result<
     Ok(())
 }
 
+/// Bring a checkpoint up to this run's architecture without changing
+/// what it computes: new conditioning inputs get zero weights, and a
+/// new second hidden layer starts as the identity (its inputs are
+/// already non-negative, so the ReLU after it changes nothing).
+fn expand_checkpoint_arch(ckpt: &str) -> candle_core::Result<()> {
+    let dev = Device::Cpu;
+    let mut t = candle_core::safetensors::load(ckpt, &dev)?;
+    let mut changed = false;
+    let l1 = t.get("l1.weight").expect("l1.weight in checkpoint").clone();
+    let (rows, cols) = l1.dims2()?;
+    let want = 5 * *EMB + *COND;
+    if cols < want {
+        let extra = Tensor::zeros((rows, want - cols), DType::F32, &dev)?;
+        t.insert("l1.weight".to_string(), Tensor::cat(&[&l1, &extra], 1)?);
+        println!("expanded l1.weight: {cols} -> {want} inputs");
+        changed = true;
+    }
+    if *DEEP && !t.contains_key("l1b.weight") {
+        t.insert("l1b.weight".to_string(), Tensor::eye(rows, DType::F32, &dev)?);
+        t.insert("l1b.bias".to_string(), Tensor::zeros(rows, DType::F32, &dev)?);
+        println!("added l1b as identity");
+        changed = true;
+    }
+    if changed {
+        candle_core::safetensors::save(&t, ckpt)?;
+    }
+    Ok(())
+}
+
 fn main() -> candle_core::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("export") {
@@ -295,7 +394,8 @@ fn main() -> candle_core::Result<()> {
 
     // All field targets on device once: [shapes, h*w] in [-1, 1].
     let fields_f32: Vec<f32> = ds.fields.iter().map(|&v| (v as f32 - 128.0) / 127.0).collect();
-    let fields_t = Tensor::from_vec(fields_f32, (ds.n_shapes, h * w), &device)?;
+    let fields_t = Tensor::from_vec(fields_f32.clone(), (ds.n_shapes, h * w), &device)?;
+    let field_of = |shape: usize| &fields_f32[shape * h * w..(shape + 1) * h * w];
 
     // Deterministic split: every 20th teacher row is validation.
     // Labeled rows always train: there are too few to hold any out.
@@ -355,6 +455,7 @@ fn main() -> candle_core::Result<()> {
     let ckpt = format!("{out_dir}/checkpoint.safetensors");
     if std::path::Path::new(&ckpt).exists() {
         expand_checkpoint_vocab(&ckpt, ds.vocab.len())?;
+        expand_checkpoint_arch(&ckpt)?;
         varmap.load(&ckpt)?;
         println!("resumed from {ckpt}");
     }
@@ -419,6 +520,74 @@ fn main() -> candle_core::Result<()> {
         }
     };
 
+    // Stretch training (NTF_STRETCH = share of focus rows pulled per
+    // epoch). The focus rows are the labeled rows, the long-word
+    // rows, and the clusters of the words in NTF_STRETCH_WORDS.
+    let stretch = envf("NTF_STRETCH", 0.0);
+    let stretch_max = envf("NTF_STRETCH_MAX", 0.8) * ds.em_px;
+    let geom = neuraltype_core::stretch::Geometry { w, h, em_px: ds.em_px, spread_px: ds.spread_px };
+    let mut focus = vec![false; n];
+    for &i in hand_idx.iter().chain(&long) {
+        focus[i] = true;
+    }
+    let tuple_of: HashMap<[u32; 5], usize> =
+        ds.feats.iter().enumerate().map(|(i, f)| (*f, i)).collect();
+    if let Ok(words) = std::env::var("NTF_STRETCH_WORDS") {
+        let id = |s: &str| ds.vocab.iter().position(|v| v == s).map_or(0, |i| i as u32);
+        for word in words.split(',').filter(|w| !w.is_empty()) {
+            let chars: Vec<char> = word.chars().collect();
+            for (a, b) in neuraltype_core::field_text::cluster_ranges(&chars) {
+                let ch = |i: Option<usize>| i.and_then(|i| chars.get(i)).map_or(0, |c| id(&c.to_string()));
+                let f = [
+                    ch(a.checked_sub(2)),
+                    ch(a.checked_sub(1)),
+                    id(&chars[a..b].iter().collect::<String>()),
+                    ch(Some(b)),
+                    ch(Some(b + 1)),
+                ];
+                match tuple_of.get(&f) {
+                    Some(&i) => focus[i] = true,
+                    None => println!("stretch word {word}: a cluster is not in the dataset"),
+                }
+            }
+        }
+    }
+    let focus_idx: Vec<usize> = (0..n).filter(|&i| focus[i] && i % 20 != 0 || focus[i] && ds.hand[i]).collect();
+    let focus_os = envd("NTF_FOCUS_OS", 1);
+    if stretch > 0.0 {
+        println!(
+            "stretch: {} focus rows x{focus_os}, share {stretch}, up to {:.0} px",
+            focus_idx.len(),
+            stretch_max
+        );
+    }
+    let mut rng2 = 0x2545f4914f6cdd1du64;
+    let mut rand01 = move || -> f32 {
+        rng2 ^= rng2 << 13;
+        rng2 ^= rng2 >> 7;
+        rng2 ^= rng2 << 17;
+        (rng2 >> 40) as f32 / (1u64 << 24) as f32
+    };
+    // A pulled target for row i: random pulls on the joins it has.
+    let pulled_row = |i: usize, rand01: &mut dyn FnMut() -> f32| {
+        use neuraltype_core::stretch::{pulled, Neighbor};
+        let mut pull = |rand01: &mut dyn FnMut() -> f32| -> (f32, f32) {
+            if rand01() < 0.35 {
+                return (0.0, 0.0);
+            }
+            let dx = -(rand01() * stretch_max).round();
+            let dy = if rand01() < 0.3 { ((rand01() - 0.5) * 0.24 * ds.em_px).round() } else { 0.0 };
+            (dx, dy)
+        };
+        let nbs: Vec<Option<Neighbor>> = ds.nb[i]
+            .iter()
+            .map(|nb| nb.map(|nb| Neighbor { field: field_of(nb.shape), dx: nb.dx, dy: nb.dy }))
+            .collect();
+        let prev = nbs[0].as_ref().map(|nb| (nb, pull(rand01)));
+        let next = nbs[1].as_ref().map(|nb| (nb, pull(rand01)));
+        pulled(field_of(ds.shape_ids[i]), &geom, prev, next)
+    };
+
     for epoch in 1..=epochs {
         shuffle(&mut train_idx);
         order.clear();
@@ -432,6 +601,11 @@ fn main() -> candle_core::Result<()> {
         for _ in 0..hand_os {
             order.extend_from_slice(&hand_idx);
         }
+        if stretch > 0.0 {
+            for _ in 0..focus_os {
+                order.extend_from_slice(&focus_idx);
+            }
+        }
         shuffle(&mut order);
         let mut loss_sum = 0.0f64;
         let mut nb = 0usize;
@@ -440,7 +614,30 @@ fn main() -> candle_core::Result<()> {
             let feats = feats_of(chunk)?;
             let target = targets_of(chunk)?;
             let (dtgt, dmask) = disp_of(chunk);
-            let (pred, dpred) = model.forward(&feats)?;
+            // Stretch: some rows train on a pulled version of their
+            // field, with the pull as the model's extra input.
+            let mut cond_t = None;
+            let mut target = target;
+            if stretch > 0.0 {
+                let mut cond = vec![0.0f32; chunk.len() * 4];
+                let mut flat: Option<Vec<f32>> = None;
+                for (bi, &i) in chunk.iter().enumerate() {
+                    if !focus[i] || rand01() >= stretch {
+                        continue;
+                    }
+                    let (field, done) = pulled_row(i, &mut rand01);
+                    cond[bi * 4..bi * 4 + 4].copy_from_slice(&done.cond(ds.em_px));
+                    let flat = flat.get_or_insert_with(|| {
+                        chunk.iter().flat_map(|&j| field_of(ds.shape_ids[j]).to_vec()).collect()
+                    });
+                    flat[bi * h * w..(bi + 1) * h * w].copy_from_slice(&field);
+                }
+                if let Some(flat) = flat {
+                    target = Tensor::from_vec(flat, (chunk.len(), 1, h, w), &device)?;
+                }
+                cond_t = Some(Tensor::from_vec(cond, (chunk.len(), 4), &device)?);
+            }
+            let (pred, dpred) = model.forward(&feats, cond_t.as_ref())?;
             let field_loss = (pred.sub(&target))?.sqr()?.mean_all()?;
             let disp_loss = ((dpred.sub(&dtgt))?.sqr()? * &dmask)?.mean_all()?;
             let loss = (field_loss + (disp_loss * 0.1)?)?;
@@ -455,7 +652,7 @@ fn main() -> candle_core::Result<()> {
         for chunk in val_idx.chunks(bs) {
             let feats = feats_of(chunk)?;
             let target = targets_of(chunk)?;
-            let (pred, _) = model.forward(&feats)?;
+            let (pred, _) = model.forward(&feats, None)?;
             vmse += (pred.sub(&target))?.sqr()?.mean_all()?.to_scalar::<f32>()? as f64
                 * chunk.len() as f64;
             let pi = pred.ge(0.0)?.to_dtype(DType::F32)?;
@@ -471,7 +668,7 @@ fn main() -> candle_core::Result<()> {
                 let feats = feats_of(chunk)?;
                 let target = targets_of(chunk)?;
                 let (dtgt, dmask) = disp_of(chunk);
-                let (pred, dpred) = model.forward(&feats)?;
+                let (pred, dpred) = model.forward(&feats, None)?;
                 let pi = pred.ge(0.0)?.to_dtype(DType::F32)?;
                 let ti = target.ge(0.0)?.to_dtype(DType::F32)?;
                 hi += (&pi * &ti)?.sum_all()?.to_scalar::<f32>()? as f64;
@@ -484,6 +681,34 @@ fn main() -> candle_core::Result<()> {
                 hi / hu.max(1.0),
                 1000.0 * de / dn.max(1.0)
             );
+        }
+        // Stretch: IoU against the geometric target, at a fixed pull
+        // of half the maximum on the next join.
+        if stretch > 0.0 && !focus_idx.is_empty() {
+            use neuraltype_core::stretch::{pulled, Neighbor};
+            let (mut si, mut su) = (0.0f64, 0.0f64);
+            let rows: Vec<usize> =
+                focus_idx.iter().copied().filter(|&i| ds.nb[i][1].is_some()).take(96).collect();
+            for chunk in rows.chunks(bs) {
+                let mut flat = Vec::with_capacity(chunk.len() * h * w);
+                let mut cond = Vec::with_capacity(chunk.len() * 4);
+                for &i in chunk {
+                    let nb = ds.nb[i][1].unwrap();
+                    let nb = Neighbor { field: field_of(nb.shape), dx: nb.dx, dy: nb.dy };
+                    let d = (-(stretch_max * 0.5).round(), 0.0);
+                    let (f, done) = pulled(field_of(ds.shape_ids[i]), &geom, None, Some((&nb, d)));
+                    flat.extend(f);
+                    cond.extend(done.cond(ds.em_px));
+                }
+                let target = Tensor::from_vec(flat, (chunk.len(), 1, h, w), &device)?;
+                let cond = Tensor::from_vec(cond, (chunk.len(), 4), &device)?;
+                let (pred, _) = model.forward(&feats_of(chunk)?, Some(&cond))?;
+                let pi = pred.ge(0.0)?.to_dtype(DType::F32)?;
+                let ti = target.ge(0.0)?.to_dtype(DType::F32)?;
+                si += (&pi * &ti)?.sum_all()?.to_scalar::<f32>()? as f64;
+                su += (((&pi + &ti)? - (&pi * &ti)?)?).sum_all()?.to_scalar::<f32>()? as f64;
+            }
+            hand_note += &format!("  stretch IoU {:.4}", si / su.max(1.0));
         }
         println!(
             "epoch {epoch:3}  train loss {:.5}  val mse {:.5}  val IoU {:.4}{hand_note}  ({:.0}s)",

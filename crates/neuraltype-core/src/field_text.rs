@@ -391,16 +391,33 @@ pub fn compose_word_pulled(font: &FieldFont, word: &str, pulls: &[(f64, f64)]) -
 
 /// `compose_word_pulled` on clusters already laid out, with the pulls
 /// in field pixels (y down), as a dragged node reports them.
+///
+/// A font trained for it draws the pulled fields itself, with the
+/// pulls as inputs to the network. Any other font gets the geometric
+/// stretch applied to its default fields.
 pub fn compose_clusters_pulled(
+    font: &FieldFont,
+    clusters: Vec<Cluster>,
+    pulls: &[(f64, f64)],
+) -> WordField {
+    compose_clusters_pulled_with(font, clusters, pulls, font.learned_stretch())
+}
+
+/// As `compose_clusters_pulled`, choosing the learned or the geometric
+/// stretch explicitly (for comparing the two).
+pub fn compose_clusters_pulled_with(
     font: &FieldFont,
     mut clusters: Vec<Cluster>,
     pulls: &[(f64, f64)],
+    learned: bool,
 ) -> WordField {
-    use crate::stretch::{join, warp, Pull, ZONE_EM};
-    let (w, h) = (font.canvas.w, font.canvas.h);
-    let zone = ZONE_EM * font.canvas.em_px as f32;
-    let reach = (crate::stretch::REACH_EM * font.canvas.em_px as f32) as usize;
-    let band = crate::stretch::BAND_EM * font.canvas.em_px as f32;
+    use crate::stretch::{applied, pulled, Geometry, Neighbor};
+    let g = Geometry {
+        w: font.canvas.w,
+        h: font.canvas.h,
+        em_px: font.canvas.em_px as f32,
+        spread_px: font.canvas.spread_px as f32,
+    };
     let n = clusters.len();
     // Fields composite at whole pixels. Two clusters draw the same
     // stretched stroke, each in its own frame, so both must agree on
@@ -410,78 +427,51 @@ pub fn compose_clusters_pulled(
         c.ox = (c.ox - cox).round() + cox;
         c.oy = (c.oy - coy).round() + coy;
     }
-    let raw = |k: usize| -> (f32, f32) {
+    let pull = |k: usize| -> (f32, f32) {
         let (dx, dy) = pulls.get(k).copied().unwrap_or((0.0, 0.0));
         (dx.round() as f32, dy.round() as f32)
     };
-    // Joins at the default layout: joins[k] is between k-1 and k, in
-    // cluster k-1's frame and in cluster k's frame.
     let base: Vec<std::rc::Rc<crate::field_model::GlyphField>> =
         clusters.iter().map(|c| font.glyph(c.feats)).collect();
-    let mut joins: Vec<Option<((f32, f32), (f32, f32), f32)>> = vec![None; n];
-    let mut src: Vec<Vec<f32>> = base.iter().map(|g| g.field.clone()).collect();
-    for k in 1..n {
-        let dx = (clusters[k].ox - clusters[k - 1].ox).round() as i64;
-        let dy = (clusters[k].oy - clusters[k - 1].oy).round() as i64;
-        joins[k] = join(&base[k - 1].field, &base[k].field, w, h, dx, dy, reach)
-            .map(|(x, y, half)| ((x, y), (x - dx as f32, y - dy as f32), half));
-        // The two clusters draw different ink where they overlap.
-        // Give both the union inside the zone, so the stretched
-        // stroke is the same from either side.
-        if let Some(((jx, jy), _, _)) = joins[k] {
-            let (x0, x1) = ((jx - zone - 2.0).floor() as i64, (jx + zone + 2.0).ceil() as i64);
-            let (y0, y1) = ((jy - 1.5 * band).floor() as i64, (jy + 1.5 * band).ceil() as i64);
-            for y in y0.max(0)..=y1.min(h as i64 - 1) {
-                for x in x0.max(0)..=x1.min(w as i64 - 1) {
-                    let (bx, by) = (x - dx, y - dy);
-                    if bx < 0 || by < 0 || bx >= w as i64 || by >= h as i64 {
-                        continue;
-                    }
-                    let (ia, ib) = (y as usize * w + x as usize, by as usize * w + bx as usize);
-                    let m = base[k - 1].field[ia].max(base[k].field[ib]);
-                    src[k - 1][ia] = m;
-                    src[k][ib] = m;
-                }
-            }
-        }
-    }
-    // A join can stretch a long way but cannot be pushed together
-    // past the zone: the ink would fold over itself.
-    let pull_px = |k: usize| -> (f32, f32) {
-        let (dx, dy) = raw(k);
-        if joins.get(k).copied().flatten().is_some() {
-            (dx.min(zone * 0.6), dy)
-        } else {
-            (dx, dy)
-        }
+    let offset = |from: usize, to: usize| -> (i64, i64) {
+        (
+            (clusters[to].ox - clusters[from].ox).round() as i64,
+            (clusters[to].oy - clusters[from].oy).round() as i64,
+        )
     };
     let mut fields: Vec<Vec<f32>> = Vec::with_capacity(n);
+    // the pull each join really got (pushes are clamped)
+    let mut moved: Vec<(f32, f32)> = vec![(0.0, 0.0); n];
     for k in 0..n {
-        let half = |j: Option<((f32, f32), (f32, f32), f32)>| j.map_or(0.0, |j| j.2);
-        let prev = Pull { at: joins[k].map(|j| j.1), half: half(joins[k]), d: pull_px(k) };
-        let next = if k + 1 < n {
-            Pull { at: joins[k + 1].map(|j| j.0), half: half(joins[k + 1]), d: pull_px(k + 1) }
+        if clusters[k].letters == " " {
+            fields.push(base[k].field.clone());
+            moved[k] = pull(k);
+            continue;
+        }
+        let prev_nb = (k > 0 && clusters[k - 1].letters != " ").then(|| {
+            let (dx, dy) = offset(k, k - 1);
+            Neighbor { field: &base[k - 1].field, dx, dy }
+        });
+        let next_nb = (k + 1 < n && clusters[k + 1].letters != " ").then(|| {
+            let (dx, dy) = offset(k, k + 1);
+            Neighbor { field: &base[k + 1].field, dx, dy }
+        });
+        let prev = prev_nb.as_ref().map(|nb| (nb, pull(k)));
+        let next = next_nb.as_ref().map(|nb| (nb, pull(k + 1)));
+        let (field, done) = if learned {
+            let done = applied(&base[k].field, &g, prev, next);
+            (font.glyph_pulled(clusters[k].feats, done.cond(g.em_px)).field.clone(), done)
         } else {
-            Pull::default()
+            pulled(&base[k].field, &g, prev, next)
         };
-        fields.push(warp(
-            &src[k],
-            w,
-            h,
-            prev,
-            next,
-            zone,
-            band,
-            font.canvas.em_px as f32,
-            font.canvas.spread_px as f32,
-        ));
+        fields.push(field);
+        moved[k] = done.prev.unwrap_or(pull(k));
     }
     // Moved origins: each pull carries the rest of the word with it.
     let (mut sx, mut sy) = (0.0f64, 0.0f64);
     for (k, c) in clusters.iter_mut().enumerate() {
-        let (px, py) = pull_px(k);
-        sx += px as f64;
-        sy += py as f64;
+        sx += moved[k].0 as f64;
+        sy += moved[k].1 as f64;
         c.ox += sx;
         c.oy += sy;
     }

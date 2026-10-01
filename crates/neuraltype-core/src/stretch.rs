@@ -226,3 +226,125 @@ pub fn join(
         (best.2 .1 - best.2 .0 + 1) as f32 / 2.0,
     ))
 }
+
+/// A neighboring cluster: its field, and where its origin sits
+/// relative to this cluster's origin at the default layout (whole
+/// pixels, y down).
+pub struct Neighbor<'a> {
+    pub field: &'a [f32],
+    pub dx: i64,
+    pub dy: i64,
+}
+
+/// The canvas all fields share.
+#[derive(Clone, Copy)]
+pub struct Geometry {
+    pub w: usize,
+    pub h: usize,
+    pub em_px: f32,
+    pub spread_px: f32,
+}
+
+impl Geometry {
+    fn zone(&self) -> f32 {
+        ZONE_EM * self.em_px
+    }
+    /// The furthest a join can be pushed together (pixels).
+    pub fn max_push(&self) -> f32 {
+        self.zone() * 0.6
+    }
+}
+
+/// What `pulled` did on each side: the pull it applied (whole pixels,
+/// pushes clamped), or None where the clusters do not join.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Applied {
+    pub prev: Option<(f32, f32)>,
+    pub next: Option<(f32, f32)>,
+}
+
+impl Applied {
+    /// The pulls as the model's conditioning input, in em: [prev x,
+    /// prev y, next x, next y], zero where there is no join.
+    pub fn cond(&self, em_px: f32) -> [f32; 4] {
+        let p = self.prev.unwrap_or((0.0, 0.0));
+        let n = self.next.unwrap_or((0.0, 0.0));
+        [p.0 / em_px, p.1 / em_px, n.0 / em_px, n.1 / em_px]
+    }
+}
+
+/// Which sides join, and the pull each would get, without warping.
+pub fn applied(
+    field: &[f32],
+    g: &Geometry,
+    prev: Option<(&Neighbor, (f32, f32))>,
+    next: Option<(&Neighbor, (f32, f32))>,
+) -> Applied {
+    let reach = (REACH_EM * g.em_px) as usize;
+    let clamp = |d: (f32, f32)| (d.0.round().min(g.max_push()), d.1.round());
+    Applied {
+        prev: prev.and_then(|(nb, d)| {
+            join(nb.field, field, g.w, g.h, -nb.dx, -nb.dy, reach).map(|_| clamp(d))
+        }),
+        next: next.and_then(|(nb, d)| {
+            join(field, nb.field, g.w, g.h, nb.dx, nb.dy, reach).map(|_| clamp(d))
+        }),
+    }
+}
+
+/// One cluster's field after its neighbors are pulled: `prev.1` is
+/// how far this cluster moved from its default place relative to the
+/// previous one, `next.1` how far the next one moved relative to this
+/// one (pixels, y down). The stretched stroke is drawn from the union
+/// of the two clusters' ink, so both sides produce the same stroke.
+pub fn pulled(
+    field: &[f32],
+    g: &Geometry,
+    prev: Option<(&Neighbor, (f32, f32))>,
+    next: Option<(&Neighbor, (f32, f32))>,
+) -> (Vec<f32>, Applied) {
+    let (w, h) = (g.w, g.h);
+    let zone = g.zone();
+    let band = BAND_EM * g.em_px;
+    let reach = (REACH_EM * g.em_px) as usize;
+    let clamp = |d: (f32, f32)| (d.0.round().min(g.max_push()), d.1.round());
+    let mut src = field.to_vec();
+    // union of both clusters' ink around the join at (jx, jy), in
+    // this cluster's frame; the neighbor sits at (dx, dy)
+    let mut unite = |src: &mut Vec<f32>, nb: &Neighbor, jx: f32, jy: f32| {
+        let (x0, x1) = ((jx - zone - 2.0).floor() as i64, (jx + zone + 2.0).ceil() as i64);
+        let (y0, y1) = ((jy - 1.5 * band).floor() as i64, (jy + 1.5 * band).ceil() as i64);
+        for y in y0.max(0)..=y1.min(h as i64 - 1) {
+            for x in x0.max(0)..=x1.min(w as i64 - 1) {
+                let (bx, by) = (x - nb.dx, y - nb.dy);
+                if bx < 0 || by < 0 || bx >= w as i64 || by >= h as i64 {
+                    continue;
+                }
+                let i = y as usize * w + x as usize;
+                src[i] = src[i].max(nb.field[by as usize * w + bx as usize]);
+            }
+        }
+    };
+    let mut done = Applied::default();
+    let mut p_pull = Pull::default();
+    if let Some((nb, d)) = prev {
+        // the join is found in the previous cluster's frame
+        if let Some((x, y, half)) = join(nb.field, field, w, h, -nb.dx, -nb.dy, reach) {
+            let (jx, jy) = (x + nb.dx as f32, y + nb.dy as f32);
+            unite(&mut src, nb, jx, jy);
+            let d = clamp(d);
+            p_pull = Pull { at: Some((jx, jy)), half, d };
+            done.prev = Some(d);
+        }
+    }
+    let mut n_pull = Pull::default();
+    if let Some((nb, d)) = next {
+        if let Some((jx, jy, half)) = join(field, nb.field, w, h, nb.dx, nb.dy, reach) {
+            unite(&mut src, nb, jx, jy);
+            let d = clamp(d);
+            n_pull = Pull { at: Some((jx, jy)), half, d };
+            done.next = Some(d);
+        }
+    }
+    (warp(&src, w, h, p_pull, n_pull, zone, band, g.em_px, g.spread_px), done)
+}

@@ -235,7 +235,16 @@ fn pulled(ntf: &str, word: &str, k: usize, dx: f64, dy: f64, out: &str) {
     let font = FieldFont::load(&std::fs::read(ntf).expect("ntf")).expect("field font");
     let mut pulls = vec![(0.0, 0.0); k + 1];
     pulls[k] = (dx, dy);
-    let wf = field_text::compose_word_pulled(&font, word, &pulls);
+    // NTF_GEOMETRIC=1 forces the engine's geometric stretch on a font
+    // that learned its own, to compare the two.
+    let wf = if std::env::var("NTF_GEOMETRIC").is_ok() {
+        let scale = font.canvas.em_px / font.canvas.upm;
+        let px: Vec<(f64, f64)> = pulls.iter().map(|&(x, y)| (x * scale, -y * scale)).collect();
+        let clusters = field_text::layout_word(&font, word);
+        field_text::compose_clusters_pulled_with(&font, clusters, &px, false)
+    } else {
+        field_text::compose_word_pulled(&font, word, &pulls)
+    };
     let s = ((1024.0 / wf.h as f64).ceil() as usize).clamp(4, 16);
     let (uw, uh) = (wf.w * s, wf.h * s);
     let mut opts = img2bez::TraceOptions::for_profile(img2bez::Profile::Clean);

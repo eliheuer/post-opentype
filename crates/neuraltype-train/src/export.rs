@@ -27,6 +27,8 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
     let n_deconv = (0..).take_while(|i| st.tensor(&format!("d{i}.weight")).is_ok()).count();
     let emb_dim = st.tensor("emb.weight").unwrap().shape()[1];
     let latent = st.tensor("l1.weight").unwrap().shape()[0];
+    let cond = st.tensor("l1.weight").unwrap().shape()[1] - 5 * emb_dim;
+    let deep = st.tensor("l1b.weight").is_ok();
     let mut chans: Vec<usize> = vec![st.tensor("d0.weight").unwrap().shape()[0]];
     for i in 0..n_deconv {
         chans.push(st.tensor(&format!("d{i}.weight")).unwrap().shape()[1]);
@@ -39,12 +41,15 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
         "emb.weight",
         "l1.weight",
         "l1.bias",
+        "l1b.weight",
+        "l1b.bias",
         "l2.weight",
         "l2.bias",
         "disp.weight",
         "disp.bias",
     ]
     .iter()
+    .filter(|s| deep || !s.starts_with("l1b"))
     .map(|s| s.to_string())
     .collect();
     for i in 0..n_deconv {
@@ -71,7 +76,7 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
         "style": style,
         "vocab": vocab,
         "arch": {
-            "emb": emb_dim, "latent": latent, "c0": c0,
+            "emb": emb_dim, "latent": latent, "c0": c0, "cond": cond,
             "grid0": [
                 (fmeta["h"].as_u64().unwrap() as usize + seed_div - 1) / seed_div,
                 (fmeta["w"].as_u64().unwrap() as usize + seed_div - 1) / seed_div
