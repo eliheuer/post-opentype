@@ -263,13 +263,22 @@ pub struct Applied {
     pub next: Option<(f32, f32)>,
 }
 
+/// The conditioning inputs are the pulls in em times this. The
+/// weights that read them start at zero when a checkpoint is extended,
+/// and the optimizer moves every weight at the same small rate; large
+/// inputs let those few weights matter in hundreds of steps instead
+/// of tens of thousands.
+pub const COND_SCALE: f32 = 16.0;
+
 impl Applied {
-    /// The pulls as the model's conditioning input, in em: [prev x,
-    /// prev y, next x, next y], zero where there is no join.
+    /// The pulls as the model's conditioning input: [prev x, prev y,
+    /// next x, next y] in em times `COND_SCALE`, zero where there is
+    /// no join.
     pub fn cond(&self, em_px: f32) -> [f32; 4] {
         let p = self.prev.unwrap_or((0.0, 0.0));
         let n = self.next.unwrap_or((0.0, 0.0));
-        [p.0 / em_px, p.1 / em_px, n.0 / em_px, n.1 / em_px]
+        let k = COND_SCALE / em_px;
+        [p.0 * k, p.1 * k, n.0 * k, n.1 * k]
     }
 }
 

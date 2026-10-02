@@ -184,14 +184,15 @@ impl FieldFont {
     }
 
     /// One forward pass for a letter whose neighbors are pulled:
-    /// `cond` is [prev x, prev y, next x, next y] in em, y down
-    /// (cached per whole pixel). Without pulls this is `glyph`.
+    /// `cond` comes from `stretch::Applied::cond` (cached per whole
+    /// pixel). Without pulls this is `glyph`.
     pub fn glyph_pulled(&self, feats: [u32; 5], cond: [f32; 4]) -> std::rc::Rc<GlyphField> {
         if !self.learned_stretch() || cond == [0.0; 4] {
             return self.glyph(feats);
         }
         let em = self.canvas.em_px as f32;
-        let key = (feats, cond.map(|c| (c * em).round() as i32));
+        let key =
+            (feats, cond.map(|c| (c * em / crate::stretch::COND_SCALE).round() as i32));
         if let Some(g) = self.pulled_cache.borrow().get(&key) {
             return g.clone();
         }
@@ -209,12 +210,18 @@ impl FieldFont {
         let a = &self.arch;
         let emb = &self.t["emb.weight"];
         // concat embeddings
-        let mut x = Vec::with_capacity(5 * a.emb + a.cond);
+        let mut x = Vec::with_capacity(5 * a.emb + 4);
         for &id in &feats {
             let base = id as usize * a.emb;
             x.extend_from_slice(&emb.data[base..base + a.emb]);
         }
-        x.extend_from_slice(&cond[..a.cond.min(4)]);
+        // A stretch adapter reads the pulls on a side branch (below);
+        // without one they are inputs to the main network.
+        let adapter = self.t.get("sa.weight").is_some();
+        let ctx = x.clone();
+        if !adapter {
+            x.extend_from_slice(&cond[..a.cond.min(4)]);
+        }
         // l1 + relu
         let mut z = dense(&x, &self.t["l1.weight"], &self.t["l1.bias"], true);
         // optional second hidden layer
@@ -225,7 +232,26 @@ impl FieldFont {
         let d = dense(&z, &self.t["disp.weight"], &self.t["disp.bias"], false);
         let (ddx, ddy) = (d[0] as f64 * self.canvas.upm, d[1] as f64 * self.canvas.upm);
         // l2 + relu, reshape to (c0, g0h, g0w)
-        let mut cur = dense(&z, &self.t["l2.weight"], &self.t["l2.bias"], true);
+        let mut cur = dense(&z, &self.t["l2.weight"], &self.t["l2.bias"], false);
+        if adapter && cond != [0.0; 4] {
+            // units with the pulls minus the same units without them
+            let (sa, sab, sb) = (&self.t["sa.weight"], &self.t["sa.bias"], &self.t["sb.weight"]);
+            let mut with = ctx.clone();
+            with.extend_from_slice(&cond);
+            let mut without = ctx;
+            without.extend_from_slice(&[0.0; 4]);
+            let on = dense(&with, sa, sab, true);
+            let off = dense(&without, sa, sab, true);
+            let u: Vec<f32> = on.iter().zip(&off).map(|(a, b)| a - b).collect();
+            let (rows, cols) = (sb.shape[0], sb.shape[1]);
+            for (o, c) in cur.iter_mut().enumerate().take(rows) {
+                let row = &sb.data[o * cols..(o + 1) * cols];
+                *c += row.iter().zip(&u).map(|(w, v)| w * v).sum::<f32>();
+            }
+        }
+        for v in cur.iter_mut() {
+            *v = v.max(0.0);
+        }
         let (mut ch, mut gh, mut gw) = (a.c0, a.grid0[0], a.grid0[1]);
         // deconv chain
         for i in 0..a.chans.len() - 1 {

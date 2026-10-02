@@ -27,7 +27,8 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
     let n_deconv = (0..).take_while(|i| st.tensor(&format!("d{i}.weight")).is_ok()).count();
     let emb_dim = st.tensor("emb.weight").unwrap().shape()[1];
     let latent = st.tensor("l1.weight").unwrap().shape()[0];
-    let cond = st.tensor("l1.weight").unwrap().shape()[1] - 5 * emb_dim;
+    let adapter = st.tensor("sa.weight").map(|t| t.shape()[0]).unwrap_or(0);
+    let cond = if adapter > 0 { 4 } else { st.tensor("l1.weight").unwrap().shape()[1] - 5 * emb_dim };
     let deep = st.tensor("l1b.weight").is_ok();
     let mut chans: Vec<usize> = vec![st.tensor("d0.weight").unwrap().shape()[0]];
     for i in 0..n_deconv {
@@ -55,6 +56,9 @@ pub fn export(train_dir: &str, fields_dir: &str, style: &str, out_path: &str) {
     for i in 0..n_deconv {
         order.push(format!("d{i}.weight"));
         order.push(format!("d{i}.bias"));
+    }
+    if adapter > 0 {
+        order.extend(["sa.weight", "sa.bias", "sb.weight"].map(String::from));
     }
 
     let mut tensors_meta = Vec::new();

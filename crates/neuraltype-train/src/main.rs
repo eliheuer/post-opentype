@@ -214,6 +214,8 @@ struct Model {
     l1: candle_nn::Linear,
     /// Optional second hidden layer (NTF_DEEP=1).
     l1b: Option<candle_nn::Linear>,
+    /// Stretch adapter: (context + pulls -> units, units -> seed).
+    adapter: Option<(candle_nn::Linear, candle_nn::Linear)>,
     l2: candle_nn::Linear,
     disp: candle_nn::Linear,
     deconvs: Vec<candle_nn::ConvTranspose2d>,
@@ -244,8 +246,21 @@ static CHANS: std::sync::LazyLock<Vec<usize>> = std::sync::LazyLock::new(|| {
 static C0: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| CHANS[0]);
 /// Conditioning inputs after the embeddings: 4 (the pulls on the two
 /// joins, see neuraltype_core::stretch) when NTF_STRETCH is set.
-static COND: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| if envf("NTF_STRETCH", 0.0) > 0.0 { 4 } else { envd("NTF_COND", 0) });
+static COND: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    if *ADAPTER > 0 {
+        0
+    } else if envf("NTF_STRETCH", 0.0) > 0.0 {
+        4
+    } else {
+        envd("NTF_COND", 0)
+    }
+});
+/// Stretch adapter width (NTF_ADAPTER). With it, the pulls do not
+/// enter the main network. A side branch reads the context and the
+/// pulls and adds to the decoder's seed; its output is exactly zero
+/// when nothing is pulled. Only the branch trains, so the font's
+/// behavior on unpulled text cannot change.
+static ADAPTER: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| envd("NTF_ADAPTER", 0));
 static DEEP: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| envd("NTF_DEEP", 0) > 0);
 fn envf(name: &str, default: f32) -> f32 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -266,6 +281,14 @@ impl Model {
         let l1 = linear(5 * *EMB + *COND, *LATENT, vb.pp("l1"))?;
         let l1b = if *DEEP { Some(linear(*LATENT, *LATENT, vb.pp("l1b"))?) } else { None };
         let l2 = linear(*LATENT, *C0 * g0.0 * g0.1, vb.pp("l2"))?;
+        let adapter = if *ADAPTER > 0 {
+            Some((
+                linear(5 * *EMB + 4, *ADAPTER, vb.pp("sa"))?,
+                candle_nn::linear_no_bias(*ADAPTER, *C0 * g0.0 * g0.1, vb.pp("sb"))?,
+            ))
+        } else {
+            None
+        };
         let disp = linear(*LATENT, 2, vb.pp("disp"))?;
         let chans = &*CHANS;
         let cfg = ConvTranspose2dConfig { padding: 1, output_padding: 0, stride: 2, dilation: 1 };
@@ -279,13 +302,14 @@ impl Model {
                 vb.pp(format!("d{i}")),
             )?);
         }
-        Ok(Model { emb, l1, l1b, l2, disp, deconvs, h, w })
+        Ok(Model { emb, l1, l1b, adapter, l2, disp, deconvs, h, w })
     }
 
     /// Returns (field [B,1,h,w], displacement [B,2], latent).
     fn forward(&self, feats: &Tensor, cond: Option<&Tensor>) -> candle_core::Result<(Tensor, Tensor)> {
         let b = feats.dim(0)?;
         let mut e = self.emb.forward(feats)?.reshape((b, 5 * *EMB))?;
+        let ctx = e.clone();
         if *COND > 0 {
             let c = match cond {
                 Some(c) => c.clone(),
@@ -298,7 +322,16 @@ impl Model {
             z = l.forward(&z)?.relu()?;
         }
         let disp = self.disp.forward(&z)?;
-        let x = self.l2.forward(&z)?.relu()?;
+        let mut x = self.l2.forward(&z)?;
+        if let (Some((sa, sb)), Some(c)) = (&self.adapter, cond) {
+            // the same units with and without the pulls: the
+            // difference is zero when the pulls are zero
+            let zero = Tensor::zeros((b, 4), DType::F32, feats.device())?;
+            let on = sa.forward(&Tensor::cat(&[&ctx, c], 1)?)?.relu()?;
+            let off = sa.forward(&Tensor::cat(&[&ctx, &zero], 1)?)?.relu()?;
+            x = (x + sb.forward(&(on - off)?)?)?;
+        }
+        let x = x.relu()?;
         let g0 = grid0_for(self.h, self.w);
         let mut x = x.reshape((b, *C0, g0.0, g0.1))?;
         for (i, d) in self.deconvs.iter().enumerate() {
@@ -355,6 +388,16 @@ fn expand_checkpoint_arch(ckpt: &str) -> candle_core::Result<()> {
         t.insert("l1b.weight".to_string(), Tensor::eye(rows, DType::F32, &dev)?);
         t.insert("l1b.bias".to_string(), Tensor::zeros(rows, DType::F32, &dev)?);
         println!("added l1b as identity");
+        changed = true;
+    }
+    if *ADAPTER > 0 && !t.contains_key("sa.weight") {
+        let seed = t.get("l2.weight").expect("l2.weight").dims2()?.0;
+        let input = 5 * *EMB + 4;
+        // sb starts at zero, so the adapter adds nothing at first
+        t.insert("sa.weight".to_string(), Tensor::randn(0f32, 0.1f32, (*ADAPTER, input), &dev)?);
+        t.insert("sa.bias".to_string(), Tensor::zeros(*ADAPTER, DType::F32, &dev)?);
+        t.insert("sb.weight".to_string(), Tensor::zeros((seed, *ADAPTER), DType::F32, &dev)?);
+        println!("added stretch adapter: {} units", *ADAPTER);
         changed = true;
     }
     if changed {
@@ -464,7 +507,20 @@ fn main() -> candle_core::Result<()> {
 
     let lr: f64 = std::env::var("NTF_LR").ok().and_then(|v| v.parse().ok()).unwrap_or(3e-4);
     println!("lr: {lr}");
-    let mut opt = candle_nn::AdamW::new_lr(varmap.all_vars(), lr)?;
+    // With an adapter, only the adapter trains.
+    let train_vars = if *ADAPTER > 0 {
+        let data = varmap.data().lock().unwrap();
+        let vars: Vec<candle_core::Var> = data
+            .iter()
+            .filter(|(name, _)| name.starts_with("sa.") || name.starts_with("sb."))
+            .map(|(_, v)| v.clone())
+            .collect();
+        println!("training the stretch adapter only ({} tensors)", vars.len());
+        vars
+    } else {
+        varmap.all_vars()
+    };
+    let mut opt = candle_nn::AdamW::new_lr(train_vars, lr)?;
 
     let feats_of = |idx: &[usize]| -> candle_core::Result<Tensor> {
         let flat: Vec<u32> = idx.iter().flat_map(|&i| ds.feats[i]).collect();
@@ -525,6 +581,7 @@ fn main() -> candle_core::Result<()> {
     // rows, and the clusters of the words in NTF_STRETCH_WORDS.
     let stretch = envf("NTF_STRETCH", 0.0);
     let stretch_max = envf("NTF_STRETCH_MAX", 0.8) * ds.em_px;
+    let stretch_w = envf("NTF_STRETCH_W", 20.0);
     let geom = neuraltype_core::stretch::Geometry { w, h, em_px: ds.em_px, spread_px: ds.spread_px };
     let mut focus = vec![false; n];
     for &i in hand_idx.iter().chain(&long) {
@@ -591,9 +648,16 @@ fn main() -> candle_core::Result<()> {
     for epoch in 1..=epochs {
         shuffle(&mut train_idx);
         order.clear();
-        let take = if replay == 0 { train_idx.len() } else { replay.min(train_idx.len()) };
+        // adapter runs see only the focus rows: nothing else can change
+        let take = if *ADAPTER > 0 {
+            0
+        } else if replay == 0 {
+            train_idx.len()
+        } else {
+            replay.min(train_idx.len())
+        };
         order.extend_from_slice(&train_idx[..take]);
-        if replay != 0 {
+        if replay != 0 && *ADAPTER == 0 {
             // A replay sample would almost never draw the long-word
             // rows, and they are the first thing the model forgets.
             order.extend_from_slice(&long);
@@ -617,10 +681,15 @@ fn main() -> candle_core::Result<()> {
             // Stretch: some rows train on a pulled version of their
             // field, with the pull as the model's extra input.
             let mut cond_t = None;
+            let mut weight_t = None;
             let mut target = target;
             if stretch > 0.0 {
                 let mut cond = vec![0.0f32; chunk.len() * 4];
                 let mut flat: Option<Vec<f32>> = None;
+                // The stretched stroke is a few percent of the canvas.
+                // Weight the cells a pull changed, or the loss barely
+                // notices whether the stroke is there.
+                let mut weight: Option<Vec<f32>> = None;
                 for (bi, &i) in chunk.iter().enumerate() {
                     if !focus[i] || rand01() >= stretch {
                         continue;
@@ -631,6 +700,16 @@ fn main() -> candle_core::Result<()> {
                         chunk.iter().flat_map(|&j| field_of(ds.shape_ids[j]).to_vec()).collect()
                     });
                     flat[bi * h * w..(bi + 1) * h * w].copy_from_slice(&field);
+                    let weight = weight.get_or_insert_with(|| vec![1.0f32; chunk.len() * h * w]);
+                    let base = field_of(ds.shape_ids[i]);
+                    for (k, (a, b)) in field.iter().zip(base).enumerate() {
+                        if (a - b).abs() > 0.1 {
+                            weight[bi * h * w + k] = stretch_w;
+                        }
+                    }
+                }
+                if let Some(weight) = weight {
+                    weight_t = Some(Tensor::from_vec(weight, (chunk.len(), 1, h, w), &device)?);
                 }
                 if let Some(flat) = flat {
                     target = Tensor::from_vec(flat, (chunk.len(), 1, h, w), &device)?;
@@ -638,7 +717,11 @@ fn main() -> candle_core::Result<()> {
                 cond_t = Some(Tensor::from_vec(cond, (chunk.len(), 4), &device)?);
             }
             let (pred, dpred) = model.forward(&feats, cond_t.as_ref())?;
-            let field_loss = (pred.sub(&target))?.sqr()?.mean_all()?;
+            let sq = (pred.sub(&target))?.sqr()?;
+            let field_loss = match &weight_t {
+                Some(wt) => (sq * wt)?.mean_all()?,
+                None => sq.mean_all()?,
+            };
             let disp_loss = ((dpred.sub(&dtgt))?.sqr()? * &dmask)?.mean_all()?;
             let loss = (field_loss + (disp_loss * 0.1)?)?;
             opt.backward_step(&loss)?;
