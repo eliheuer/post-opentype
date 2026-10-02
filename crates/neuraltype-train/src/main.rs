@@ -430,6 +430,7 @@ fn main() -> candle_core::Result<()> {
         Device::Cpu
     };
     println!("device: {device:?}");
+    println!("epochs: {epochs}");
 
     let ds = load(fields_dir);
     let n = ds.feats.len();

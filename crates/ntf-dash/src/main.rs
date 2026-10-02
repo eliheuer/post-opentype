@@ -4,8 +4,9 @@
 //! epochs, and the hardware. House palette: ink green, gold, red.
 //!
 //! Usage: ntf-dash [log-path] [total-epochs]
-//! Defaults: the newest data/train-*.log under the cwd, 60 epochs.
-//! Keys: q quits.
+//! Defaults: the newest data/train-*.log under the cwd, and the
+//! epoch count the log states (60 for logs from before it did).
+//! Keys: Tab switches to the next run's log, q quits.
 
 use std::io;
 use std::process::Command;
@@ -30,6 +31,10 @@ struct Epoch {
     mse: f64,
     iou: f64,
     secs: f64,
+    /// Fine-tuning extras, when the run reports them.
+    labeled: Option<f64>,
+    disp_err: Option<f64>,
+    stretch: Option<f64>,
 }
 
 #[derive(Default)]
@@ -41,6 +46,10 @@ struct RunInfo {
     batch: String,
     oversample: String,
     resumed: bool,
+    /// What the run trains on beyond the teacher rows.
+    extra: String,
+    /// Epochs the log says it will run, summed over resumed legs.
+    planned: u32,
 }
 
 #[derive(Default, Clone)]
@@ -76,11 +85,23 @@ fn parse_log(path: &str) -> (RunInfo, Vec<Epoch>) {
             info.oversample = line["oversampling".len()..].trim().to_string();
         } else if line.starts_with("resumed from") {
             info.resumed = true;
+        } else if line.starts_with("epochs:") {
+            info.planned += line["epochs:".len()..].trim().parse::<u32>().unwrap_or(0);
+        } else if line.starts_with("stretch:")
+            || line.starts_with("labeled rows")
+            || line.starts_with("training the stretch adapter")
+        {
+            info.extra = line.trim().to_string();
         } else if t.len() >= 12 && t[0] == "epoch" {
-            // epoch N train loss X val mse Y val IoU Z (Ss)
+            // epoch N train loss X val mse Y val IoU Z [labeled IoU A
+            // disp err Bu] [stretch IoU C] (Ss)
             // Resumed legs restart the counter at 1 in the same log;
             // offset so the chart shows cumulative epochs.
-            let secs = t[11].trim_matches(|c| c == '(' || c == ')' || c == 's');
+            let secs = t[t.len() - 1].trim_matches(|c| c == '(' || c == ')' || c == 's');
+            let after = |a: &str, b: &str| -> Option<f64> {
+                let i = t.windows(2).position(|w| w[0] == a && w[1] == b)?;
+                t.get(i + 2)?.trim_end_matches('u').parse().ok()
+            };
             let raw: u32 = t[1].parse().unwrap_or(0);
             let last = epochs.last().map(|e: &Epoch| e.n).unwrap_or(0);
             if raw + epoch_offset <= last {
@@ -92,6 +113,9 @@ fn parse_log(path: &str) -> (RunInfo, Vec<Epoch>) {
                 mse: t[7].parse().unwrap_or(0.0),
                 iou: t[10].parse().unwrap_or(0.0),
                 secs: secs.parse().unwrap_or(0.0),
+                labeled: after("labeled", "IoU"),
+                disp_err: after("disp", "err"),
+                stretch: after("stretch", "IoU"),
             });
         }
     }
@@ -121,20 +145,23 @@ fn poll_gpu() -> Gpu {
     }
 }
 
-fn newest_log() -> Option<String> {
-    let mut best: Option<(std::time::SystemTime, String)> = None;
-    for e in std::fs::read_dir("data").ok()?.flatten() {
+/// The training logs under data/, newest first.
+fn logs() -> Vec<String> {
+    let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
+    for e in std::fs::read_dir("data").into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if name.starts_with("train-") && name.ends_with(".log") {
             if let Ok(m) = e.metadata().and_then(|m| m.modified()) {
-                let p = format!("data/{name}");
-                if best.as_ref().map_or(true, |(t, _)| m > *t) {
-                    best = Some((m, p));
-                }
+                found.push((m, format!("data/{name}")));
             }
         }
     }
-    best.map(|(_, p)| p)
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
+fn newest_log() -> Option<String> {
+    logs().into_iter().next()
 }
 
 fn fmt_eta(secs: f64) -> String {
@@ -148,12 +175,12 @@ fn fmt_eta(secs: f64) -> String {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let log = args
+    let mut log = args
         .get(1)
         .cloned()
         .or_else(newest_log)
         .unwrap_or_else(|| "data/train.log".into());
-    let total: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(60);
+    let total_arg: Option<u32> = args.get(2).and_then(|s| s.parse().ok());
 
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
@@ -172,6 +199,7 @@ fn main() -> io::Result<()> {
             last_gpu = Instant::now();
         }
         let (info, epochs) = parse_log(&log);
+        let total = total_arg.unwrap_or(if info.planned > 0 { info.planned } else { 60 });
 
         terminal.draw(|f| draw(f, &log, total, &info, &epochs, &gpu))?;
 
@@ -183,6 +211,14 @@ fn main() -> io::Result<()> {
             if let Event::Key(k) = event::read()? {
                 if matches!(k.code, KeyCode::Char('q') | KeyCode::Esc) {
                     break;
+                }
+                if k.code == KeyCode::Tab {
+                    // next run: the logs in order, wrapping around
+                    let all = logs();
+                    if !all.is_empty() {
+                        let at = all.iter().position(|p| *p == log).map_or(0, |i| i + 1);
+                        log = all[at % all.len()].clone();
+                    }
                 }
             }
         }
@@ -222,6 +258,7 @@ fn draw(f: &mut Frame, log: &str, total: u32, info: &RunInfo, epochs: &[Epoch], 
     let sub2 = Line::from(vec![
         Span::styled(format!(" rows {} ", info.rows), Style::new().fg(DIM)),
         Span::styled(format!("· oversampling {} ", info.oversample), Style::new().fg(DIM)),
+        Span::styled(format!("· {} ", info.extra), Style::new().fg(DIM)),
     ]);
     f.render_widget(
         Paragraph::new(vec![title, sub, sub2])
@@ -234,8 +271,15 @@ fn draw(f: &mut Frame, log: &str, total: u32, info: &RunInfo, epochs: &[Epoch], 
         .split(rows[1]);
 
     let pts: Vec<(f64, f64)> = epochs.iter().map(|e| (e.n as f64, e.iou)).collect();
+    let series = |get: fn(&Epoch) -> Option<f64>| -> Vec<(f64, f64)> {
+        epochs.iter().filter_map(|e| get(e).map(|v| (e.n as f64, v))).collect()
+    };
+    let stretch_pts = series(|e| e.stretch);
+    let labeled_pts = series(|e| e.labeled);
     let (ymin, ymax) = pts
         .iter()
+        .chain(&stretch_pts)
+        .chain(&labeled_pts)
         .fold((1.0f64, 0.0f64), |(lo, hi), &(_, y)| (lo.min(y), hi.max(y)));
     let ymin = (ymin - 0.02).max(0.0);
     let ymax = (ymax + 0.02).min(1.0);
@@ -246,7 +290,28 @@ fn draw(f: &mut Frame, log: &str, total: u32, info: &RunInfo, epochs: &[Epoch], 
         .graph_type(GraphType::Line)
         .style(Style::new().fg(INK))
         .data(&pts);
-    let chart = Chart::new(vec![ds])
+    let mut sets = vec![ds];
+    if !stretch_pts.is_empty() {
+        sets.push(
+            Dataset::default()
+                .name("stretch IoU")
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(GOLD))
+                .data(&stretch_pts),
+        );
+    }
+    if !labeled_pts.is_empty() {
+        sets.push(
+            Dataset::default()
+                .name("labeled IoU")
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(RED))
+                .data(&labeled_pts),
+        );
+    }
+    let chart = Chart::new(sets)
         .block(
             Block::bordered()
                 .border_style(DIM)
@@ -278,7 +343,7 @@ fn draw(f: &mut Frame, log: &str, total: u32, info: &RunInfo, epochs: &[Epoch], 
 
     let right = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Length(7),
+        Constraint::Length(10),
         Constraint::Min(3),
     ])
     .split(mid[1]);
@@ -293,7 +358,15 @@ fn draw(f: &mut Frame, log: &str, total: u32, info: &RunInfo, epochs: &[Epoch], 
             .label(Span::styled(format!("{:.0}%", pct * 100.0), Style::new().fg(GOLD).bold())),
         right[0],
     );
-    let stats = vec![
+    let extra = |label: &'static str, v: Option<f64>, digits: usize, color: Color| {
+        v.map(|v| {
+            Line::from(vec![
+                Span::styled(label, Style::new().fg(GRAY)),
+                Span::styled(format!("{v:.digits$}"), Style::new().fg(color).bold()),
+            ])
+        })
+    };
+    let mut stats = vec![
         Line::from(vec![
             Span::styled("   IoU  ", Style::new().fg(GRAY)),
             Span::styled(format!("{:.4}", cur.iou), Style::new().fg(INK).bold()),
@@ -315,6 +388,9 @@ fn draw(f: &mut Frame, log: &str, total: u32, info: &RunInfo, epochs: &[Epoch], 
             Span::styled(fmt_eta(remaining), Style::new().fg(GOLD).bold()),
         ]),
     ];
+    stats.extend(extra("stretch ", cur.stretch, 4, GOLD));
+    stats.extend(extra("labeled ", cur.labeled, 4, RED));
+    stats.extend(extra("disp err", cur.disp_err, 1, GRAY));
     f.render_widget(
         Paragraph::new(stats).block(Block::bordered().border_style(DIM).title(Span::styled(
             " live ",
@@ -356,6 +432,8 @@ fn draw(f: &mut Frame, log: &str, total: u32, info: &RunInfo, epochs: &[Epoch], 
                 format!("{:.5}", e.loss),
                 format!("{:.5}", e.mse),
                 format!("{:.4}", e.iou),
+                e.stretch.map_or("-".into(), |v| format!("{v:.4}")),
+                e.labeled.map_or("-".into(), |v| format!("{v:.4}")),
                 format!("{:.0}s", e.secs),
             ])
             .style(Style::new().fg(GRAY))
@@ -369,11 +447,13 @@ fn draw(f: &mut Frame, log: &str, total: u32, info: &RunInfo, epochs: &[Epoch], 
                 Constraint::Length(9),
                 Constraint::Length(9),
                 Constraint::Length(8),
+                Constraint::Length(8),
+                Constraint::Length(8),
                 Constraint::Length(6),
             ],
         )
         .header(
-            Row::new(vec!["epoch", "loss", "val mse", "IoU", "s"])
+            Row::new(vec!["epoch", "loss", "val mse", "IoU", "stretch", "labeled", "s"])
                 .style(Style::new().fg(GOLD).bold()),
         )
         .block(Block::bordered().border_style(DIM).title(Span::styled(
@@ -433,7 +513,7 @@ fn draw(f: &mut Frame, log: &str, total: u32, info: &RunInfo, epochs: &[Epoch], 
 
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " q quit · refreshes every 0.7s · GPU every 2s",
+            " tab next run · q quit · refreshes every 0.7s · GPU every 2s",
             Style::new().fg(DIM),
         ))),
         rows[3],
