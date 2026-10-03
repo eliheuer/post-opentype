@@ -6,8 +6,9 @@
 //! record format and the same canvas as the teacher's, so they
 //! append to a teacher dataset and the trainer fine-tunes on both.
 //!
-//! Input is a phrase file (JSON), written by a font editor or by
-//! `distill standin`:
+//! Input is a neural source (a `.nufo` directory): every labeled
+//! sample of every canvas becomes one phrase. A phrase file (JSON),
+//! written by `distill standin`, is accepted too, for tests:
 //!
 //! ```json
 //! { "text": "بسم الله", "upm": 1000,
@@ -189,6 +190,47 @@ fn clipped(ink: &[bool], sw: usize, sh: usize) -> bool {
         || (0..sh).any(|y| ink[y * sw] || ink[y * sw + sw - 1])
 }
 
+/// Every labeled sample of a neural source, as phrases named
+/// `canvas #n`. A sample that is not ready stops the run with the
+/// reason: training must not quietly skip work.
+fn nufo_phrases(path: &str) -> Vec<(String, Phrase)> {
+    let source = nufo::Source::load(std::path::Path::new(path)).unwrap_or_else(|e| panic!("{e}"));
+    let mut out = Vec::new();
+    for canvas in &source.canvases {
+        for (n, sample) in canvas.item.samples.iter().enumerate() {
+            let name = format!("{} #{}", canvas.name, n + 1);
+            let prepared = nufo::training::prepare(sample, &canvas.contours)
+                .unwrap_or_else(|e| panic!("{path}: {name}: {e}"));
+            let clusters = prepared
+                .letters
+                .iter()
+                .map(|ink| PhraseCluster {
+                    letters: ink.letter.to_string(),
+                    origin: None,
+                    regions: ink
+                        .regions
+                        .iter()
+                        .map(|poly| poly.iter().map(|p| [p.x, p.y]).collect())
+                        .collect(),
+                    paths: ink.contours.iter().map(|c| c.to_svg()).collect(),
+                })
+                .collect();
+            out.push((
+                name,
+                Phrase {
+                    text: prepared.text,
+                    upm: source.units_per_em,
+                    outline: Some(prepared.outline.to_svg()),
+                    baseline_y: 0.0,
+                    clusters,
+                },
+            ));
+        }
+    }
+    println!("{path}: {} labeled sample(s)", out.len());
+    out
+}
+
 pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
     let meta: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(format!("{base_dir}/fields-meta.json")).unwrap(),
@@ -221,9 +263,18 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
     fields_bin.extend(sdf_from_grid(&vec![false; cv.w * SS * cv.h * SS], cv.w, cv.h, SS, cv.spread_px));
     n_shapes += 1;
 
+    let mut phrases: Vec<(String, Phrase)> = Vec::new();
     for path in phrase_paths {
-        let phrase: Phrase =
-            serde_json::from_str(&std::fs::read_to_string(path).expect("phrase file")).unwrap();
+        if std::path::Path::new(path).is_dir() {
+            phrases.extend(nufo_phrases(path));
+        } else {
+            let phrase: Phrase =
+                serde_json::from_str(&std::fs::read_to_string(path).expect("phrase file")).unwrap();
+            phrases.push((path.clone(), phrase));
+        }
+    }
+    for (path, phrase) in &phrases {
+        let path = path.as_str();
         let k = upm / phrase.upm;
         let outline = phrase.outline.as_deref().map(|d| kurbo::BezPath::from_svg(d).expect("outline"));
         let words: Vec<Vec<char>> = phrase

@@ -1704,6 +1704,7 @@ dependencies = [
  "img2bez",
  "kurbo 0.11.3",
  "neuraltype-core",
+ "nufo",
  "serde",
  "serde_json",
  "ttf-parser",
@@ -1790,6 +1791,16 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "ratatui",
+]
+
+[[package]]
+name = "nufo"
+version = "0.1.0"
+dependencies = [
+ "kurbo 0.13.1",
+ "norad",
+ "plist",
+ "serde",
 ]
 
 [[package]]

@@ -16,4 +16,5 @@ serde_json.workspace = true
 harfrust = "0.12.0"
 kurbo.workspace = true
 img2bez = { path = "../../../img2bez" }
+nufo = { path = "../../../runebender-xilem/crates/nufo" }
 image = "0.25"
