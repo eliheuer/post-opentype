@@ -430,6 +430,14 @@ fn main() -> candle_core::Result<()> {
         Device::Cpu
     };
     println!("device: {device:?}");
+    // The starting weights are random. NTF_SEED fixes them, so a run can
+    // be made again; the CPU backend has no seed and says so.
+    if let Some(seed) = std::env::var("NTF_SEED").ok().and_then(|v| v.parse::<u64>().ok()) {
+        match device.set_seed(seed) {
+            Ok(()) => println!("seed: {seed}"),
+            Err(error) => println!("seed: not set ({error})"),
+        }
+    }
     println!("epochs: {epochs}");
 
     let ds = load(fields_dir);
@@ -580,6 +588,10 @@ fn main() -> candle_core::Result<()> {
     // Stretch training (NTF_STRETCH = share of focus rows pulled per
     // epoch). The focus rows are the labeled rows, the long-word
     // rows, and the clusters of the words in NTF_STRETCH_WORDS.
+    let ink_w = envf("NTF_INK_W", 0.0) as f64;
+    if ink_w > 0.0 {
+        println!("ink weight: {ink_w}");
+    }
     let stretch = envf("NTF_STRETCH", 0.0);
     let stretch_max = envf("NTF_STRETCH_MAX", 0.8) * ds.em_px;
     let stretch_w = envf("NTF_STRETCH_W", 20.0);
@@ -719,6 +731,18 @@ fn main() -> candle_core::Result<()> {
             }
             let (pred, dpred) = model.forward(&feats, cond_t.as_ref())?;
             let sq = (pred.sub(&target))?.sqr()?;
+            // Ink is a few percent of a canvas, so a blank field already
+            // scores well and a small dataset can sit there for a long
+            // time. NTF_INK_W weights the cells in and near the ink more.
+            let weight_t = if ink_w > 0.0 {
+                let near = (target.ge(-0.9)?.to_dtype(DType::F32)? * ink_w)?;
+                Some(match weight_t {
+                    Some(wt) => (wt + near)?,
+                    None => (near + 1.0)?,
+                })
+            } else {
+                weight_t
+            };
             let field_loss = match &weight_t {
                 Some(wt) => (sq * wt)?.mean_all()?,
                 None => sq.mean_all()?,
