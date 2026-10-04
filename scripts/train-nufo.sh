@@ -21,6 +21,8 @@
 #   FROM_VERSION (export again from the training of an older version of
 #   the same name, without training; for a changed header or exporter),
 #   NTF_LICENSE and NTF_NOTICE (the license and notice in the font's header),
+#   EM_PX (64, pixels of field per em; the canvas size itself is
+#   measured from the largest labeled letter of the source),
 #   FEATURES (cargo features for the trainer, such as cuda or metal),
 #   TRAIN_HOST (an ssh host to train on; it needs a built checkout of this
 #   repo at TRAIN_REPO, by default GH/repos/post-opentype in its home)
@@ -52,11 +54,12 @@ else
     cargo build --release -p neuraltype-distill
     cargo build --release -p neuraltype-train ${FEATURES:+--features "$FEATURES"}
 
-    # The canvas every shape is drawn on. With no rows, this base adds
-    # nothing to the dataset but the canvas size.
+    # An empty base: no rows, and a canvas sized from the source. The
+    # largest labeled letter sets the size, so new drawings need no
+    # new setting. EM_PX is the detail: pixels of field per em.
     cat > "$dir/base/fields-meta.json" <<META
-{ "em_px": 64, "w": 155, "h": 219, "origin_x": 55.36, "origin_y": 108.48,
-  "spread_px": 8.0, "upm": 1000.0, "shapes": 0 }
+{ "em_px": ${EM_PX:-64}, "w": 0, "h": 0, "origin_x": 0, "origin_y": 0,
+  "spread_px": 8.0, "upm": 1000.0, "shapes": 0, "auto_canvas": true }
 META
     : > "$dir/base/dataset.jsonl"
     : > "$dir/base/fields.bin"
@@ -145,6 +148,7 @@ manifest = {
         "seed": next((l.split(": ", 1)[1] for l in log if l.startswith("seed")), None),
     },
     "dataset": {
+        "canvas": json.load(open(f"{d}/fields/fields-meta.json")),
         "rows": len(rows),
         "clusters": [
             {k: r.get(k) for k in ("prev2", "prev", "letters", "next", "next2")} for r in rows

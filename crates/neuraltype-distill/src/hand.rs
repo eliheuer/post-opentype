@@ -140,13 +140,14 @@ fn ink_grid(
     ink
 }
 
-/// The origin (font units) that centers a cluster's ink in the canvas.
-fn centered_origin(
+/// The box of a cluster's ink in font units, measured at `scale` px
+/// per unit. None when the cluster has no ink.
+fn ink_box(
     c: &PhraseCluster,
     outline: Option<&kurbo::BezPath>,
     k: f64,
-    cv: &Canvas,
-) -> Option<(f64, f64)> {
+    scale: f64,
+) -> Option<kurbo::Rect> {
     // Bound the search by the geometry, then measure the real ink.
     let mut bb: Option<kurbo::Rect> = None;
     let mut grow = |r: kurbo::Rect| bb = Some(bb.map_or(r, |b| b.union(r)));
@@ -162,7 +163,6 @@ fn centered_origin(
         }
     }
     let bb = bb?;
-    let scale = cv.px_per_unit;
     let (w, h) = ((bb.width() * scale).ceil() as usize + 2, (bb.height() * scale).ceil() as usize + 2);
     let (x0, y_top) = (bb.x0 - 1.0 / scale, bb.y1 + 1.0 / scale);
     let ink = ink_grid(c, outline, k, w, h, scale, x0, y_top);
@@ -176,12 +176,75 @@ fn centered_origin(
     if c0 == usize::MAX {
         return None;
     }
-    let cx = x0 + (c0 + c1 + 1) as f64 / 2.0 / scale;
-    let cy = y_top - (r0 + r1 + 1) as f64 / 2.0 / scale;
+    Some(kurbo::Rect::new(
+        x0 + c0 as f64 / scale,
+        y_top - (r1 + 1) as f64 / scale,
+        x0 + (c1 + 1) as f64 / scale,
+        y_top - r0 as f64 / scale,
+    ))
+}
+
+/// The origin (font units) that centers a cluster's ink in the canvas.
+fn centered_origin(
+    c: &PhraseCluster,
+    outline: Option<&kurbo::BezPath>,
+    k: f64,
+    cv: &Canvas,
+) -> Option<(f64, f64)> {
+    let ink = ink_box(c, outline, k, cv.px_per_unit)?;
+    let (cx, cy) = (ink.center().x, ink.center().y);
     Some((
         cx - (cv.w as f64 / 2.0 - cv.origin_x) / cv.px_per_unit,
         cy - (cv.origin_y - cv.h as f64 / 2.0) / cv.px_per_unit,
     ))
+}
+
+/// A phrase's words, and its clusters grouped into the engine's
+/// clusters word by word: the engine fuses some letters (لا, لله in
+/// الله).
+fn lay_out(path: &str, phrase: &Phrase) -> (Vec<Vec<char>>, Vec<Vec<PhraseCluster>>) {
+    let words: Vec<Vec<char>> = phrase
+        .text
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .map(|w| w.chars().collect())
+        .collect();
+    let mut input = phrase.clusters.iter();
+    let mut laid: Vec<Vec<PhraseCluster>> = Vec::new();
+    for chars in &words {
+        let mut word_clusters = Vec::new();
+        for (a, b) in cluster_ranges(chars) {
+            let want: String = chars[a..b].iter().collect();
+            let mut merged: Option<PhraseCluster> = None;
+            while merged.as_ref().map_or(true, |m| m.letters != want) {
+                let c = input.next().unwrap_or_else(|| {
+                    panic!("{path}: ran out of clusters at {want:?} in {:?}", phrase.text)
+                });
+                match merged.as_mut() {
+                    None => merged = Some(c.clone()),
+                    Some(m) => {
+                        // a fused cluster keeps the first part's
+                        // origin only if every part had one
+                        if c.origin.is_none() {
+                            m.origin = None;
+                        }
+                        m.letters.push_str(&c.letters);
+                        m.regions.extend(c.regions.iter().cloned());
+                        m.paths.extend(c.paths.iter().cloned());
+                    }
+                }
+                let got = &merged.as_ref().unwrap().letters;
+                assert!(
+                    want.starts_with(got.as_str()),
+                    "{path}: clusters do not match the text: got {got:?}, want {want:?}"
+                );
+            }
+            word_clusters.push(merged.unwrap());
+        }
+        laid.push(word_clusters);
+    }
+    assert!(input.next().is_none(), "{path}: more clusters than letters in the text");
+    (words, laid)
 }
 
 /// Whether any ink touches the canvas edge (the cluster is clipped).
@@ -238,7 +301,7 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
     .unwrap();
     let f = |k: &str| meta[k].as_f64().unwrap();
     let upm = f("upm");
-    let cv = Canvas {
+    let mut cv = Canvas {
         w: f("w") as usize,
         h: f("h") as usize,
         origin_x: f("origin_x"),
@@ -259,11 +322,6 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
     let mut space_ctx: Vec<[String; 4]> = Vec::new();
     let mut n_rows = 0usize;
 
-    // One empty field, shared by every space row.
-    let empty_id = n_shapes;
-    fields_bin.extend(sdf_from_grid(&vec![false; cv.w * SS * cv.h * SS], cv.w, cv.h, SS, cv.spread_px));
-    n_shapes += 1;
-
     let mut phrases: Vec<(String, Phrase)> = Vec::new();
     for path in phrase_paths {
         if std::path::Path::new(path).is_dir() {
@@ -274,54 +332,55 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
             phrases.push((path.clone(), phrase));
         }
     }
+    // A base with no shapes and `"auto_canvas": true` takes its canvas
+    // from the phrases: large enough for the largest cluster's ink, with
+    // the field's spread around it. The source decides the size, so a
+    // longer letter needs no new setting.
+    let mut meta = meta;
+    if meta["auto_canvas"].as_bool() == Some(true) {
+        assert_eq!(base_shapes, 0, "auto_canvas needs a base with no shapes");
+        let (mut max_w, mut max_h) = (0.0f64, 0.0f64);
+        let mut largest = String::new();
+        for (path, phrase) in &phrases {
+            let k = upm / phrase.upm;
+            let outline =
+                phrase.outline.as_deref().map(|d| kurbo::BezPath::from_svg(d).expect("outline"));
+            for c in lay_out(path, phrase).1.iter().flatten() {
+                if let Some(ink) = ink_box(c, outline.as_ref(), k, cv.px_per_unit) {
+                    if ink.width() > max_w {
+                        largest = format!("{} in {:?}", c.letters, phrase.text);
+                    }
+                    max_w = max_w.max(ink.width());
+                    max_h = max_h.max(ink.height());
+                }
+            }
+        }
+        let margin = cv.spread_px + 2.0;
+        cv.w = (max_w * cv.px_per_unit + 2.0 * margin).ceil() as usize;
+        cv.h = (max_h * cv.px_per_unit + 2.0 * margin).ceil() as usize;
+        cv.origin_x = cv.w as f64 / 2.0;
+        cv.origin_y = cv.h as f64 / 2.0;
+        meta["w"] = serde_json::json!(cv.w);
+        meta["h"] = serde_json::json!(cv.h);
+        meta["origin_x"] = serde_json::json!(cv.origin_x);
+        meta["origin_y"] = serde_json::json!(cv.origin_y);
+        println!(
+            "canvas: {} x {} px ({:.0} x {:.0} units of ink at most; the widest is {largest})",
+            cv.w, cv.h, max_w, max_h
+        );
+    }
+    let cv = cv;
+
+    // One empty field, shared by every space row.
+    let empty_id = n_shapes;
+    fields_bin.extend(sdf_from_grid(&vec![false; cv.w * SS * cv.h * SS], cv.w, cv.h, SS, cv.spread_px));
+    n_shapes += 1;
+
     for (path, phrase) in &phrases {
         let path = path.as_str();
         let k = upm / phrase.upm;
         let outline = phrase.outline.as_deref().map(|d| kurbo::BezPath::from_svg(d).expect("outline"));
-        let words: Vec<Vec<char>> = phrase
-            .text
-            .split(' ')
-            .filter(|w| !w.is_empty())
-            .map(|w| w.chars().collect())
-            .collect();
-
-        // Group the input clusters into the engine's clusters, word
-        // by word: the engine fuses some letters (لا, لله in الله).
-        let mut input = phrase.clusters.iter();
-        let mut laid: Vec<Vec<PhraseCluster>> = Vec::new();
-        for chars in &words {
-            let mut word_clusters = Vec::new();
-            for (a, b) in cluster_ranges(chars) {
-                let want: String = chars[a..b].iter().collect();
-                let mut merged: Option<PhraseCluster> = None;
-                while merged.as_ref().map_or(true, |m| m.letters != want) {
-                    let c = input.next().unwrap_or_else(|| {
-                        panic!("{path}: ran out of clusters at {want:?} in {:?}", phrase.text)
-                    });
-                    match merged.as_mut() {
-                        None => merged = Some(c.clone()),
-                        Some(m) => {
-                            // a fused cluster keeps the first part's
-                            // origin only if every part had one
-                            if c.origin.is_none() {
-                                m.origin = None;
-                            }
-                            m.letters.push_str(&c.letters);
-                            m.regions.extend(c.regions.iter().cloned());
-                            m.paths.extend(c.paths.iter().cloned());
-                        }
-                    }
-                    let got = &merged.as_ref().unwrap().letters;
-                    assert!(
-                        want.starts_with(got.as_str()),
-                        "{path}: clusters do not match the text: got {got:?}, want {want:?}"
-                    );
-                }
-                word_clusters.push(merged.unwrap());
-            }
-            laid.push(word_clusters);
-        }
-        assert!(input.next().is_none(), "{path}: more clusters than letters in the text");
+        let (words, laid) = lay_out(path, phrase);
 
         // Every cluster's origin in font units, given or centered.
         let origins: Vec<Vec<(f64, f64)>> = laid
@@ -402,7 +461,6 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
 
     std::fs::write(format!("{out_dir}/dataset.jsonl"), dataset).unwrap();
     std::fs::write(format!("{out_dir}/fields.bin"), &fields_bin).unwrap();
-    let mut meta = meta;
     meta["shapes"] = serde_json::json!(n_shapes);
     std::fs::write(
         format!("{out_dir}/fields-meta.json"),
