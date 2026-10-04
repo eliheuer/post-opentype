@@ -15,6 +15,7 @@
 #
 # Settings come from the environment and are recorded in the manifest:
 #   NTF_LR (1e-3), NTF_HAND_OS (64, passes over the rows per epoch),
+#   NTF_LICENSE and NTF_NOTICE (the license and notice in the font's header),
 #   FEATURES (cargo features for the trainer, such as cuda or metal)
 set -e
 src="${1:?usage: train-nufo.sh <source.nufo> <name> [epochs]}"
@@ -50,6 +51,18 @@ started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # To a file, not through a pipe: a failed step must stop the script.
 target/release/ntf-train "$dir/fields" "$dir/train" "$epochs" > "$dir/train.log"
 tail -n 3 "$dir/train.log"
+# The font's header says where it came from. The exporter's default
+# notice is the distilled font's, which is false here.
+NTF_LICENSE="${NTF_LICENSE:-Not specified}" \
+NTF_NOTICE="${NTF_NOTICE:-Trained from the source $name alone. No teacher font.}" \
+python3 - "$dir/fields/header-extra.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+extra = json.load(open(path))
+extra["license"] = os.environ["NTF_LICENSE"]
+extra["notice"] = os.environ["NTF_NOTICE"]
+json.dump(extra, open(path, "w"), ensure_ascii=False, indent=2)
+PY
 target/release/ntf-train export "$dir/train" "$dir/fields" "$name-$version" "$dir/font.ntf"
 
 NAME="$name" VERSION="$version" DIR="$dir" SRC="$src" EPOCHS="$epochs" STARTED="$started" \
