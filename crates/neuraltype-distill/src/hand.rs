@@ -250,7 +250,8 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
     std::fs::create_dir_all(out_dir).unwrap();
 
     let mut dataset = std::fs::read_to_string(format!("{base_dir}/dataset.jsonl")).unwrap();
-    if !dataset.ends_with('\n') {
+    // An empty base has no rows: a font made from a source alone.
+    if !dataset.is_empty() && !dataset.ends_with('\n') {
         dataset.push('\n');
     }
     let mut fields_bin = std::fs::read(format!("{base_dir}/fields.bin")).unwrap();

@@ -5,3 +5,9 @@
 /build
 /demo/kufic.ntf
 data/
+
+# Model versions: the weights and fonts stay on disk, out of git.
+models/smoke/
+models/**/*.safetensors
+models/**/*.ntf
+models/**/fields.bin
