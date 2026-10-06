@@ -5,6 +5,9 @@
 #
 #   scripts/train-nufo.sh <source.nufo> <name> [epochs]
 #
+# OUT_DIR puts the versions somewhere else than models/<name>/, such as
+# beside the source. The epoch lines stream to stdout as they happen.
+#
 # A version holds everything needed to make it again:
 #   manifest.json   what went in, the settings, the result
 #   source.nufo/    the source as it was, outlines and labels
@@ -27,6 +30,8 @@
 #   TRAIN_HOST (an ssh host to train on; it needs a built checkout of this
 #   repo at TRAIN_REPO, by default GH/repos/post-opentype in its home)
 set -e
+# A failing trainer must stop the script even through tee.
+set -o pipefail 2>/dev/null || true
 src="${1:?usage: train-nufo.sh <source.nufo> <name> [epochs]}"
 name="${2:?usage: train-nufo.sh <source.nufo> <name> [epochs]}"
 epochs="${3:-400}"
@@ -36,16 +41,21 @@ export NTF_SEED="${NTF_SEED:-1}"
 export NTF_INK_W="${NTF_INK_W:-0}"
 cd "$(dirname "$0")/.."
 
+# Versions go under models/<name>/ here, or under OUT_DIR when it is set: an
+# editor keeps a source's models beside the source.
+out="${OUT_DIR:-models/$name}"
 n=1
-while [ -e "models/$name/$(printf %03d "$n")" ]; do n=$((n + 1)); done
+while [ -e "$out/$(printf %03d "$n")" ]; do n=$((n + 1)); done
 version="$(printf %03d "$n")"
-dir="models/$name/$version"
+dir="$out/$version"
+# On another machine the run lives under the checkout there.
+rdir="models/$name/$version"
 mkdir -p "$dir/base" "$dir/train"
 cp -R "$src" "$dir/source.nufo"
 
 if [ -n "$FROM_VERSION" ]; then
     # No training: the rows, checkpoint, and log of the older version.
-    from="models/$name/$FROM_VERSION"
+    from="$out/$FROM_VERSION"
     rm -r "$dir/source.nufo" "$dir/base" "$dir/train"
     cp -R "$from/source.nufo" "$from/fields" "$from/train" "$from/train.log" "$dir/"
     started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -73,17 +83,18 @@ META
         # Train on another machine: send the rows, run its trainer, and bring
         # the checkpoint and log back. Everything else happens here.
         remote="${TRAIN_REPO:-GH/repos/post-opentype}"
-        ssh "$TRAIN_HOST" "mkdir -p '$remote/$dir'"
-        rsync -a "$dir/fields" "$dir/train" "$TRAIN_HOST:$remote/$dir/"
+        ssh "$TRAIN_HOST" "mkdir -p '$remote/$rdir'"
+        rsync -a "$dir/fields" "$dir/train" "$TRAIN_HOST:$remote/$rdir/"
         # Every NTF_ setting goes along, so the remote run is the recorded one.
         settings="$(env | grep '^NTF_' | grep -v '^NTF_LICENSE=\|^NTF_NOTICE=' | sed "s/=\(.*\)/='\1'/" | tr '\n' ' ')"
+        # The log streams back as it grows, so a watcher can show the epochs.
         ssh "$TRAIN_HOST" "cd '$remote' && $settings \
-            target/release/ntf-train '$dir/fields' '$dir/train' '$epochs' > '$dir/train.log'"
-        rsync -a "$TRAIN_HOST:$remote/$dir/train" "$TRAIN_HOST:$remote/$dir/train.log" "$dir/"
+            target/release/ntf-train '$rdir/fields' '$rdir/train' '$epochs' 2>&1 | tee '$rdir/train.log'" \
+            | tee "$dir/train.log"
+        rsync -a "$TRAIN_HOST:$remote/$rdir/train" "$dir/"
     else
-        target/release/ntf-train "$dir/fields" "$dir/train" "$epochs" > "$dir/train.log"
+        target/release/ntf-train "$dir/fields" "$dir/train" "$epochs" 2>&1 | tee "$dir/train.log"
     fi
-    tail -n 3 "$dir/train.log"
 fi
 
 # The font's header says where it came from. The exporter's default
