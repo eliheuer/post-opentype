@@ -256,12 +256,19 @@ fn clipped(ink: &[bool], sw: usize, sh: usize) -> bool {
 /// Every labeled sample of a neural source, as phrases named
 /// `canvas #n`. A sample that is not ready stops the run with the
 /// reason: training must not quietly skip work.
+///
+/// NTF_ONLY names one sample, as `canvas #n`, to train from that
+/// sample alone: a short run to check one drawing.
 fn nufo_phrases(path: &str) -> Vec<(String, Phrase)> {
     let source = nufo::Source::load(std::path::Path::new(path)).unwrap_or_else(|e| panic!("{e}"));
+    let only = std::env::var("NTF_ONLY").ok().filter(|only| !only.is_empty());
     let mut out = Vec::new();
     for canvas in &source.canvases {
         for (n, sample) in canvas.item.samples.iter().enumerate() {
             let name = format!("{} #{}", canvas.name, n + 1);
+            if only.as_deref().is_some_and(|only| only != name) {
+                continue;
+            }
             let prepared = nufo::training::prepare(sample, &canvas.contours)
                 .unwrap_or_else(|e| panic!("{path}: {name}: {e}"));
             let clusters = prepared
@@ -290,7 +297,14 @@ fn nufo_phrases(path: &str) -> Vec<(String, Phrase)> {
             ));
         }
     }
-    println!("{path}: {} labeled sample(s)", out.len());
+    if let Some(only) = &only {
+        if out.is_empty() {
+            panic!("{path}: no sample named {only:?}; NTF_ONLY names one as \"canvas #n\"");
+        }
+        println!("{path}: sample {only} alone");
+    } else {
+        println!("{path}: {} labeled sample(s)", out.len());
+    }
     out
 }
 
