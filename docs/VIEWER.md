@@ -34,6 +34,7 @@ These must work the same way in both viewers.
 | Click on ink | Moves the caret to the nearest caret index. |
 | Drag from ink | Selects a range. Field fonts show the selection as a cloud, the union of the selected letters' fields, traced at a raised level. |
 | Drag the active node | Pulls that letter and the rest of its word. The join before it stretches. |
+| Opening caret | One node in from the start, after the first letter. |
 | Pulls | Belong to one text. A change to the text clears them. |
 
 ## 3. Shared colors
