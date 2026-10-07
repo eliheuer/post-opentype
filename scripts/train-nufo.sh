@@ -30,6 +30,10 @@
 #   FEATURES (cargo features for the trainer, such as cuda or metal),
 #   TRAIN_HOST (an ssh host to train on; it needs a built checkout of this
 #   repo at TRAIN_REPO, by default GH/repos/post-opentype in its home)
+#
+# Every finished version is also copied into the models repo, MODELS_REPO
+# (default ~/GH/repos/font-garden-models), committed there, and pushed to its
+# kiln remote when kiln answers. A failed backup warns; it does not fail the run.
 set -e
 # A failing trainer must stop the script even through tee.
 set -o pipefail 2>/dev/null || true
@@ -183,4 +187,34 @@ if manifest["training_reused_from"]:
 json.dump(manifest, open(f"{d}/manifest.json", "w"), ensure_ascii=False, indent=2)
 print(f"wrote {d}/manifest.json")
 PY
+# Back the version up into the models repo. Sample runs keep their folder:
+# NastaliqDemo/sample-ba-basic-2/001.
+models_repo="${MODELS_REPO:-$HOME/GH/repos/font-garden-models}"
+if [ -d "$models_repo/.git" ]; then
+    sub="$(basename "$out")"
+    case "$sub" in
+        sample-*) rel="$name/$sub/$version" ;;
+        *) rel="$name/$version" ;;
+    esac
+    (
+        set -e
+        if [ -e "$models_repo/$rel" ]; then
+            echo "backup: $models_repo/$rel exists already; left it alone"
+            exit 0
+        fi
+        mkdir -p "$models_repo/$(dirname "$rel")"
+        cp -R "$dir" "$models_repo/$rel"
+        last="$(grep '^epoch' "$dir/train.log" | tail -1 | sed 's/  */ /g')"
+        git -C "$models_repo" add "$rel"
+        git -C "$models_repo" commit -q -m "$name $version" -m "${last:-no epochs}"
+        if git -C "$models_repo" remote | grep -qx kiln \
+            && ssh -o ConnectTimeout=5 -o BatchMode=yes kiln true 2>/dev/null; then
+            git -C "$models_repo" push -q kiln HEAD
+            echo "backup: $models_repo/$rel, committed and pushed to kiln"
+        else
+            echo "backup: $models_repo/$rel, committed (kiln not reached)"
+        fi
+    ) || echo "backup: failed; the version is still at $dir"
+fi
+
 echo "model $name $version: $dir/font.ntf"
