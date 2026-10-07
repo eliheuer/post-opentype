@@ -318,3 +318,209 @@ pub fn marks(f: &FieldFont, line: &FieldLine, shift: f64, y_min: f64) -> Marks {
     }
     Marks { nodes, spans }
 }
+
+/// The outline around the letters from caret index `start` to `end`:
+/// the union of their fields, traced at a raised level, so it hugs the
+/// ink like the cloud bands around manuscript text. One path per word
+/// that has selected letters, moved like `marks`. A one-letter range
+/// is the hint around the letter before the caret.
+pub fn selection_paths(
+    f: &FieldFont,
+    line: &FieldLine,
+    start: usize,
+    end: usize,
+    shift: f64,
+    y_min: f64,
+) -> Vec<kurbo::BezPath> {
+    let mut paths = Vec::new();
+    if end <= start {
+        return paths;
+    }
+    for pw in &line.words {
+        let a = start.max(pw.char_base);
+        let b = end.min(pw.char_base + pw.n_chars);
+        if a >= b {
+            continue;
+        }
+        let mut ci = 0usize;
+        let mask: Vec<bool> = pw
+            .wf
+            .clusters
+            .iter()
+            .map(|c| {
+                let nch = c.letters.chars().count();
+                let cs = pw.char_base + ci;
+                ci += nch;
+                cs < end && cs + nch > start
+            })
+            .collect();
+        let sel = field_text::compose_clusters(f, pw.wf.clusters.clone(), Some(&mask));
+        if sel.w == 0 {
+            continue;
+        }
+        // +0.45 of the spread (8 px) dilates the zero contour by
+        // about 3.6 px
+        let dil: Vec<f32> = sel.grid.iter().map(|v| v + 0.45).collect();
+        let path = field_text::trace_field_smooth(&dil, sel.w, sel.h);
+        paths.push(kurbo::Affine::translate((sel.x0 + pw.dx + shift, sel.y0 - y_min)) * path);
+    }
+    paths
+}
+
+/// A node is a gap when an edit there touches a word boundary: the
+/// start or end of the text, or beside a space. Viewers draw it hollow.
+pub fn is_gap(chars: &[char], i: usize) -> bool {
+    i == 0 || i >= chars.len() || chars[i - 1] == ' ' || chars[i] == ' '
+}
+
+/// The strand: a natural cubic spline through the nodes in caret
+/// order. C2 continuous (curvature never jumps), chord-length
+/// parameterized so uneven node spacing does not kink the curve.
+/// Coincident nodes (ligature interiors) collapse to one spline point
+/// but keep their parameters. Same math as the web demo's buildStrand.
+pub struct Strand {
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    t: Vec<f64>,
+    mx: Vec<f64>,
+    my: Vec<f64>,
+    t_of_index: Vec<usize>,
+}
+
+impl Strand {
+    pub fn new(points: &[(f64, f64)]) -> Strand {
+        let mut keep: Vec<usize> = Vec::new();
+        let mut t_of_index = vec![0; points.len()];
+        for (i, p) in points.iter().enumerate() {
+            let far = keep.last().map_or(true, |&k| {
+                let q = points[k];
+                (p.0 - q.0).hypot(p.1 - q.1) > 0.75
+            });
+            if far {
+                keep.push(i);
+            }
+            t_of_index[i] = keep.len().saturating_sub(1);
+        }
+        let xs: Vec<f64> = keep.iter().map(|&i| points[i].0).collect();
+        let ys: Vec<f64> = keep.iter().map(|&i| points[i].1).collect();
+        let mut t = vec![0.0];
+        for k in 1..xs.len() {
+            let chord = (xs[k] - xs[k - 1]).hypot(ys[k] - ys[k - 1]).max(1e-6);
+            t.push(t[k - 1] + chord);
+        }
+        if xs.is_empty() {
+            t.clear();
+        }
+        let mx = second_derivatives(&xs, &t);
+        let my = second_derivatives(&ys, &t);
+        Strand { xs, ys, t, mx, my, t_of_index }
+    }
+
+    /// The parameter at the end of the strand.
+    pub fn t_end(&self) -> f64 {
+        self.t.last().copied().unwrap_or(0.0)
+    }
+
+    /// The parameter of node `i`.
+    pub fn t_of(&self, i: usize) -> f64 {
+        if self.t_of_index.is_empty() {
+            return 0.0;
+        }
+        self.t[self.t_of_index[i.min(self.t_of_index.len() - 1)]]
+    }
+
+    /// The point at parameter `u`.
+    pub fn sample(&self, u: f64) -> (f64, f64) {
+        let n = self.xs.len();
+        if n == 0 {
+            return (0.0, 0.0);
+        }
+        if n == 1 {
+            return (self.xs[0], self.ys[0]);
+        }
+        let u = u.clamp(self.t[0], self.t[n - 1]);
+        let mut k = 0;
+        while k < n - 2 && self.t[k + 1] < u {
+            k += 1;
+        }
+        (
+            eval_axis(&self.xs, &self.mx, &self.t, k, u),
+            eval_axis(&self.ys, &self.my, &self.t, k, u),
+        )
+    }
+
+    /// The strand from `u0` to `u1` as a polyline, a point every 3
+    /// units or so, as the web demo strokes it.
+    pub fn polyline(&self, u0: f64, u1: f64) -> Vec<(f64, f64)> {
+        let steps = ((u1 - u0).abs() / 3.0).ceil().max(2.0) as usize;
+        (0..=steps)
+            .map(|k| self.sample(u0 + (u1 - u0) * k as f64 / steps as f64))
+            .collect()
+    }
+}
+
+/// Second derivatives of a natural spline through `v` at parameters
+/// `t` (the Thomas algorithm).
+fn second_derivatives(v: &[f64], t: &[f64]) -> Vec<f64> {
+    let n = v.len();
+    if n < 3 {
+        return vec![0.0; n];
+    }
+    let (mut a, mut b, mut c, mut d) = (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    b[0] = 1.0;
+    b[n - 1] = 1.0;
+    for k in 1..n - 1 {
+        let h0 = t[k] - t[k - 1];
+        let h1 = t[k + 1] - t[k];
+        a[k] = h0;
+        b[k] = 2.0 * (h0 + h1);
+        c[k] = h1;
+        d[k] = 6.0 * ((v[k + 1] - v[k]) / h1 - (v[k] - v[k - 1]) / h0);
+    }
+    for k in 1..n {
+        let m = a[k] / b[k - 1];
+        b[k] -= m * c[k - 1];
+        d[k] -= m * d[k - 1];
+    }
+    let mut m2 = vec![0.0; n];
+    m2[n - 1] = d[n - 1] / b[n - 1];
+    for k in (0..n - 1).rev() {
+        m2[k] = (d[k] - c[k] * m2[k + 1]) / b[k];
+    }
+    m2
+}
+
+fn eval_axis(v: &[f64], m2: &[f64], t: &[f64], k: usize, u: f64) -> f64 {
+    let h = t[k + 1] - t[k];
+    let a = (t[k + 1] - u) / h;
+    let b = (u - t[k]) / h;
+    a * v[k] + b * v[k + 1] + ((a * a * a - a) * m2[k] + (b * b * b - b) * m2[k + 1]) * h * h / 6.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_strand_passes_through_its_nodes_and_merges_coincident_ones() {
+        let nodes = [(0.0, 0.0), (10.0, 5.0), (10.2, 5.0), (30.0, 0.0), (40.0, -8.0)];
+        let strand = Strand::new(&nodes);
+        for (i, node) in nodes.iter().enumerate() {
+            if i == 2 {
+                // Within 0.75 of node 1: it shares node 1's parameter.
+                assert_eq!(strand.t_of(2), strand.t_of(1));
+                continue;
+            }
+            let p = strand.sample(strand.t_of(i));
+            assert!((p.0 - node.0).abs() < 1e-9 && (p.1 - node.1).abs() < 1e-9, "{i}: {p:?}");
+        }
+        assert_eq!(strand.polyline(0.0, strand.t_end()).first(), Some(&(0.0, 0.0)));
+    }
+
+    #[test]
+    fn gaps_are_the_ends_and_the_sides_of_spaces() {
+        let chars: Vec<char> = "ab cd".chars().collect();
+        let gaps: Vec<bool> = (0..=chars.len()).map(|i| is_gap(&chars, i)).collect();
+        assert_eq!(gaps, vec![true, false, true, true, false, true]);
+    }
+}

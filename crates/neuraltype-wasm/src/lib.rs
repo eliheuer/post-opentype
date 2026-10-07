@@ -227,37 +227,8 @@ impl NtfFont {
             return String::new();
         }
         let line = build_field_line(f, text, &self.node_offsets.borrow());
-        let shift = line.width;
         let mut combined = String::new();
-        for pw in &line.words {
-            let a = start.max(pw.char_base);
-            let b = end.min(pw.char_base + pw.n_chars);
-            if a >= b {
-                continue;
-            }
-            let mut ci = 0usize;
-            let mask: Vec<bool> = pw
-                .wf
-                .clusters
-                .iter()
-                .map(|c| {
-                    let nch = c.letters.chars().count();
-                    let cs = pw.char_base + ci;
-                    ci += nch;
-                    cs < end && cs + nch > start
-                })
-                .collect();
-            let sel =
-                field_text::compose_clusters(f, pw.wf.clusters.clone(), Some(&mask));
-            if sel.w == 0 {
-                continue;
-            }
-            // +0.45 of the spread (8 px) dilates the zero contour by
-            // about 3.6 px
-            let dil: Vec<f32> = sel.grid.iter().map(|v| v + 0.45).collect();
-            let path = field_text::trace_field_smooth(&dil, sel.w, sel.h);
-            let path =
-                kurbo::Affine::translate((sel.x0 + pw.dx + shift, sel.y0 - line.y_min)) * path;
+        for path in field_line::selection_paths(f, &line, start, end, line.width, line.y_min) {
             combined.push_str(&path.to_svg());
             combined.push(' ');
         }
