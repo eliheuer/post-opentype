@@ -247,6 +247,8 @@ pub fn marks(f: &FieldFont, line: &FieldLine, shift: f64, y_min: f64) -> Marks {
             }
         };
 
+        // the word's strokes, without its dots: nodes snap only to these
+        let body = body_cells(wf, f.canvas.em_px);
         let pen_right_word = pw.dx + pw.ink_r + shift;
         let left_ink = pw.ink_l + pw.dx + shift;
         let cl = &wf.clusters;
@@ -262,38 +264,41 @@ pub fn marks(f: &FieldFont, line: &FieldLine, shift: f64, y_min: f64) -> Marks {
                 let i = pw.char_base + ci + j;
                 spans.push(Span { i, x: right - (j as f64 + 1.0) * cw_, w: cw_ });
                 if i <= n {
+                    // Every node sits on the ink, in the middle of
+                    // the stroke: a node is a handle on the writing.
+                    let on_ink = |x: f64, y: f64| {
+                        let (ix, iy) = snap_to_ink(wf, &body, x - pw.dx - shift, y + y_min);
+                        (ix + pw.dx + shift, iy - y_min)
+                    };
                     if k == 0 && j == 0 {
-                        // the before-the-word slot: on the first
-                        // letter's ink entry, not the abstract pen
-                        // origin
-                        nodes[i] =
-                            (pw.ink_r + pw.dx + shift + line.space * 0.25, pw.entry_y - y_min);
+                        // before the word: where the first letter's
+                        // ink begins
+                        nodes[i] = on_ink(pw.ink_r - 1.0 + pw.dx + shift, pw.entry_y - y_min);
                     } else if nch == 1 {
-                        // interior break: the visual junction where
-                        // this letter's ink meets the previous
-                        // letter's ink; chain origin when they do
-                        // not touch
+                        // between letters: where their ink meets; where
+                        // it does not, the ink nearest the next
+                        // letter's start
                         nodes[i] = match join_point(&cl[k - 1], c) {
                             Some((jx, jy)) => (jx + pw.dx + shift, jy - y_min),
-                            None => (ox, oy),
+                            None => match nearest_between(f, &cl[k - 1], c) {
+                                Some((ex, ey)) => on_ink(ex + pw.dx + shift, ey - y_min),
+                                None => on_ink(ox, oy),
+                            },
                         };
                     } else {
-                        // ligatures: one node per character cell,
-                        // spread across the cluster's visual span --
-                        // the origin can sit at either end of a wide
-                        // ligature, and stacking nodes there clumps
-                        // the strand
-                        nodes[i] = (right - (j as f64 + 0.5) * cw_, oy);
+                        // ligatures: one node per character, spread
+                        // across the cluster's visual span
+                        nodes[i] = on_ink(right - (j as f64 + 0.5) * cw_, oy);
                     }
                 }
             }
             ci += nch;
         }
-        // end-of-word caret: just past the left ink edge, at the
-        // height where the word's ink actually exits
+        // after the word: where the last letter's ink ends
         let end_i = pw.char_base + pw.n_chars;
         if end_i <= n {
-            nodes[end_i] = (left_ink - line.space * 0.5, pw.exit_y - y_min);
+            let (ix, iy) = snap_to_ink(wf, &body, pw.ink_l + 1.0, pw.exit_y);
+            nodes[end_i] = (ix + pw.dx + shift, iy - y_min);
         }
     }
     // fill gaps (leading/trailing spaces, unrendered words):
@@ -523,4 +528,300 @@ mod tests {
         let gaps: Vec<bool> = (0..=chars.len()).map(|i| is_gap(&chars, i)).collect();
         assert_eq!(gaps, vec![true, false, true, true, false, true]);
     }
+}
+
+/// The middle of the stroke nearest `(x, y)` in a word's own frame
+/// (field pixels, y down, the word's chain origin): the nearest inked
+/// cell, then the deepest cell close to it, so a node sits mid-stroke.
+/// The point itself when the word has no ink within reach.
+fn snap_to_ink(wf: &field_text::WordField, body: &[bool], x: f64, y: f64) -> (f64, f64) {
+    let (w, h) = (wf.w as i64, wf.h as i64);
+    if w == 0 || h == 0 {
+        return (x, y);
+    }
+    let gx = (x - wf.x0 - 0.5).round() as i64;
+    let gy = (y - wf.y0 - 0.5).round() as i64;
+    let at = |cx: i64, cy: i64| -> f32 {
+        if cx < 0 || cy < 0 || cx >= w || cy >= h || !body[(cy * w + cx) as usize] {
+            -1.0
+        } else {
+            wf.grid[(cy * w + cx) as usize]
+        }
+    };
+    // nearest inked cell, searching outward ring by ring
+    let mut nearest = None;
+    'rings: for r in 0..48i64 {
+        let mut best: Option<(i64, (i64, i64))> = None;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dy.abs() != r {
+                    continue;
+                }
+                let (cx, cy) = (gx + dx, gy + dy);
+                if at(cx, cy) >= 0.0 {
+                    let d = dx * dx + dy * dy;
+                    if best.map_or(true, |(bd, _)| d < bd) {
+                        best = Some((d, (cx, cy)));
+                    }
+                }
+            }
+        }
+        if let Some((_, cell)) = best {
+            nearest = Some(cell);
+            break 'rings;
+        }
+    }
+    let Some((nx, ny)) = nearest else {
+        return (x, y);
+    };
+    // the deepest cell within a small reach: the middle of the stroke
+    // half a stroke's width: enough to center across the stroke, too
+    // little to slide along it toward a thicker part
+    let reach = 3i64;
+    let mut deep = (at(nx, ny), nx, ny);
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            if dx * dx + dy * dy > reach * reach {
+                continue;
+            }
+            let v = at(nx + dx, ny + dy);
+            if v > deep.0 {
+                deep = (v, nx + dx, ny + dy);
+            }
+        }
+    }
+    (wf.x0 + deep.1 as f64 + 0.5, wf.y0 + deep.2 as f64 + 0.5)
+}
+
+/// The strand through a line's nodes, as the pen moved: between two
+/// nodes of one word it runs along the middle of the stroke that joins
+/// them; between words, or where no ink joins them, it is a straight
+/// segment. `nodes` are as `marks` gives them, moved by `shift` and
+/// `-y_min`. Returns the strand's points and, for each node, the index
+/// of its point.
+pub fn strand(
+    line: &FieldLine,
+    nodes: &[(f64, f64)],
+    shift: f64,
+    y_min: f64,
+) -> (Vec<(f64, f64)>, Vec<usize>) {
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    let mut at_node = Vec::with_capacity(nodes.len());
+    for (i, node) in nodes.iter().enumerate() {
+        if i > 0 {
+            let word = line
+                .words
+                .iter()
+                .find(|pw| pw.char_base <= i - 1 && i <= pw.char_base + pw.n_chars);
+            let path = word.and_then(|pw| {
+                let to_word = |p: (f64, f64)| (p.0 - pw.dx - shift, p.1 + y_min);
+                let path = ink_path(&pw.wf, to_word(nodes[i - 1]), to_word(*node))?;
+                Some(
+                    path.into_iter()
+                        .map(|(x, y)| (x + pw.dx + shift, y - y_min))
+                        .collect::<Vec<_>>(),
+                )
+            });
+            if let Some(path) = path {
+                // the path's own ends are the nodes themselves
+                points.extend(path.into_iter().skip(1));
+                if let Some(last) = points.last_mut() {
+                    *last = *node;
+                }
+            } else {
+                points.push(*node);
+            }
+        } else {
+            points.push(*node);
+        }
+        at_node.push(points.len() - 1);
+    }
+    (points, at_node)
+}
+
+/// The cheapest path through a word's ink from `a` to `b` (word frame),
+/// favoring deep cells so it keeps to the middle of the stroke, then
+/// smoothed. None when no ink joins them near the straight line.
+fn ink_path(wf: &field_text::WordField, a: (f64, f64), b: (f64, f64)) -> Option<Vec<(f64, f64)>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let (w, h) = (wf.w as i64, wf.h as i64);
+    let cell = |p: (f64, f64)| ((p.0 - wf.x0 - 0.5).round() as i64, (p.1 - wf.y0 - 0.5).round() as i64);
+    let (sa, sb) = (cell(a), cell(b));
+    // search a window around the two ends
+    let margin = 40;
+    let x0 = (sa.0.min(sb.0) - margin).max(0);
+    let y0 = (sa.1.min(sb.1) - margin).max(0);
+    let x1 = (sa.0.max(sb.0) + margin).min(w - 1);
+    let y1 = (sa.1.max(sb.1) + margin).min(h - 1);
+    if x1 < x0 || y1 < y0 {
+        return None;
+    }
+    let (ww, wh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
+    let inside = |c: (i64, i64)| c.0 >= x0 && c.0 <= x1 && c.1 >= y0 && c.1 <= y1;
+    if !inside(sa) || !inside(sb) {
+        return None;
+    }
+    let idx = |c: (i64, i64)| (c.1 - y0) as usize * ww + (c.0 - x0) as usize;
+    let value = |c: (i64, i64)| wf.grid[(c.1 * w + c.0) as usize];
+    let mut cost = vec![f64::INFINITY; ww * wh];
+    let mut from = vec![usize::MAX; ww * wh];
+    let mut heap = BinaryHeap::new();
+    cost[idx(sa)] = 0.0;
+    heap.push((Reverse((0.0f64 * 1000.0) as u64), sa));
+    let goal = idx(sb);
+    while let Some((Reverse(c), at)) = heap.pop() {
+        let here = idx(at);
+        if here == goal {
+            break;
+        }
+        if (c as f64) / 1000.0 > cost[here] + 1e-6 {
+            continue;
+        }
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+            let next = (at.0 + dx, at.1 + dy);
+            if !inside(next) {
+                continue;
+            }
+            let v = value(next);
+            // ink only, with the ends allowed a hair outside it
+            if v < 0.0 && next != sb {
+                continue;
+            }
+            let step = if dx != 0 && dy != 0 { std::f64::consts::SQRT_2 } else { 1.0 };
+            let depth = (v.clamp(0.0, 1.0)) as f64;
+            let total = cost[here] + step * (1.0 + 4.0 * (1.0 - depth));
+            let n = idx(next);
+            if total < cost[n] {
+                cost[n] = total;
+                from[n] = here;
+                heap.push((Reverse((total * 1000.0) as u64), next));
+            }
+        }
+    }
+    if !cost[goal].is_finite() {
+        return None;
+    }
+    let mut cells = Vec::new();
+    let mut at = goal;
+    while at != usize::MAX {
+        cells.push(((at % ww) as i64 + x0, (at / ww) as i64 + y0));
+        if at == idx(sa) {
+            break;
+        }
+        at = from[at];
+    }
+    cells.reverse();
+    let mut path: Vec<(f64, f64)> = cells
+        .iter()
+        .map(|c| (wf.x0 + c.0 as f64 + 0.5, wf.y0 + c.1 as f64 + 0.5))
+        .collect();
+    path[0] = a;
+    let last = path.len() - 1;
+    path[last] = b;
+    // smooth the stair steps away, ends held
+    for _ in 0..4 {
+        let prev = path.clone();
+        for k in 1..prev.len().saturating_sub(1) {
+            path[k] = (
+                (prev[k - 1].0 + 2.0 * prev[k].0 + prev[k + 1].0) / 4.0,
+                (prev[k - 1].1 + 2.0 * prev[k].1 + prev[k + 1].1) / 4.0,
+            );
+        }
+    }
+    // every other point is plenty
+    let mut thin: Vec<(f64, f64)> = path.iter().step_by(2).copied().collect();
+    if thin.last() != path.last() {
+        thin.push(*path.last().unwrap());
+    }
+    Some(thin)
+}
+
+/// Which cells of a word's field are stroke, not dot: inked cells in a
+/// connected piece of at least a fifth of an em square, or longer than
+/// 0.3 em, like a thin alif. Dots and other marks are small and compact.
+fn body_cells(wf: &field_text::WordField, em_px: f64) -> Vec<bool> {
+    let (w, h) = (wf.w, wf.h);
+    let mut body = vec![false; w * h];
+    let mut seen = vec![false; w * h];
+    let least = ((0.2 * em_px) * (0.2 * em_px)).max(16.0) as usize;
+    let long = (0.3 * em_px).max(4.0) as usize;
+    let mut stack = Vec::new();
+    for start in 0..w * h {
+        if seen[start] || wf.grid[start] < 0.0 {
+            continue;
+        }
+        let mut piece = Vec::new();
+        let (mut lo_x, mut hi_x, mut lo_y, mut hi_y) = (usize::MAX, 0, usize::MAX, 0);
+        seen[start] = true;
+        stack.push(start);
+        while let Some(at) = stack.pop() {
+            piece.push(at);
+            let (x, y) = (at % w, at / w);
+            lo_x = lo_x.min(x);
+            hi_x = hi_x.max(x);
+            lo_y = lo_y.min(y);
+            hi_y = hi_y.max(y);
+            let mut visit = |n: usize| {
+                if !seen[n] && wf.grid[n] >= 0.0 {
+                    seen[n] = true;
+                    stack.push(n);
+                }
+            };
+            if x > 0 {
+                visit(at - 1);
+            }
+            if x + 1 < w {
+                visit(at + 1);
+            }
+            if y > 0 {
+                visit(at - w);
+            }
+            if y + 1 < h {
+                visit(at + w);
+            }
+        }
+        if piece.len() >= least || (hi_x - lo_x).max(hi_y - lo_y) >= long {
+            for at in piece {
+                body[at] = true;
+            }
+        }
+    }
+    body
+}
+
+/// Where letter `a`'s ink comes closest to letter `b`'s, on `a`'s side
+/// (word frame, field pixels): the exit toward a letter it does not
+/// touch. None when either has no ink.
+fn nearest_between(
+    f: &FieldFont,
+    a: &field_text::Cluster,
+    b: &field_text::Cluster,
+) -> Option<(f64, f64)> {
+    let (cw, ch) = (f.canvas.w, f.canvas.h);
+    let (cox, coy) = (f.canvas.origin_x, f.canvas.origin_y);
+    let ink = |c: &field_text::Cluster| -> Vec<(f64, f64)> {
+        let g = f.glyph(c.feats);
+        let (x0, y0) = ((c.ox - cox).round(), (c.oy - coy).round());
+        let mut cells = Vec::new();
+        for y in (0..ch).step_by(2) {
+            for x in (0..cw).step_by(2) {
+                if g.field[y * cw + x] >= 0.0 {
+                    cells.push((x0 + x as f64 + 0.5, y0 + y as f64 + 0.5));
+                }
+            }
+        }
+        cells
+    };
+    let (ia, ib) = (ink(a), ink(b));
+    let mut best: Option<(f64, (f64, f64))> = None;
+    for p in &ia {
+        for q in &ib {
+            let d = (p.0 - q.0).powi(2) + (p.1 - q.1).powi(2);
+            if best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, *p));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
 }

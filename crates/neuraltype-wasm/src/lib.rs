@@ -324,6 +324,9 @@ fn shape_field(
         .iter()
         .map(|s| serde_json::json!({ "i": s.i, "x": s.x, "w": s.w }))
         .collect();
+    // the strand as the pen moved, with each node's point on it
+    let (strand_points, strand_nodes) = field_line::strand(&line, &nodes, shift, y_min);
+    let strand_json: Vec<[f64; 2]> = strand_points.iter().map(|p| [p.0, p.1]).collect();
     let nodes_json: Vec<serde_json::Value> = nodes
         .iter()
         .enumerate()
@@ -339,6 +342,8 @@ fn shape_field(
         "glyphs": [],
         "spans": spans,
         "nodes": nodes_json,
+        "strand": strand_json,
+        "strand_nodes": strand_nodes,
         "field": true,
         "em_px": f.canvas.em_px,
     })
