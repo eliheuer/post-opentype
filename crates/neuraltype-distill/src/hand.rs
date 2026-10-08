@@ -501,9 +501,42 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
                 })
                 .to_string();
                 dataset.push('\n');
+                let ddx = (ox - prev.0).round() as i32;
+                let ddy = (oy - prev.1).round() as i32;
                 prev = (ox, oy);
                 n_shapes += 1;
                 n_rows += 1;
+                // Drawn stretch has two lengths, the short drawing and the
+                // long one. Three in-between rows teach the network the
+                // lengths between: the long drawing with its flat middle
+                // shortened to a quarter, half and three quarters of the
+                // extra length, its ends and dots kept as drawn. The
+                // letter before it keeps its drawing at each pull.
+                if let Some(st) = plan {
+                    for t in [0.25f32, 0.5, 0.75] {
+                        let between = if st.short_w > 0.0 {
+                            let bx = ink_box(c, outline.as_ref(), k, cv.px_per_unit).unwrap();
+                            let extra = bx.width() - st.short_w;
+                            shorten(&ink, &cv, field_origin, (bx.x0, bx.x1), st.short_w, (1.0 - t as f64) * extra, 0.3 * upm)
+                        } else {
+                            ink.clone()
+                        };
+                        fields_bin.extend(sdf_from_grid(&between, cv.w, cv.h, SS, cv.spread_px));
+                        dataset += &serde_json::json!({
+                            "letters": c.letters,
+                            "prev2": if a >= 2 { Some(chars[a - 2]) } else { None },
+                            "prev": if a >= 1 { Some(chars[a - 1]) } else { None },
+                            "next": chars.get(b), "next2": chars.get(b + 1),
+                            "index": ci, "shape": n_shapes, "pri": 1,
+                            "ddx": ddx, "ddy": ddy,
+                            "cond": st.cond.map(|v| v * t),
+                        })
+                        .to_string();
+                        dataset.push('\n');
+                        n_shapes += 1;
+                        n_rows += 1;
+                    }
+                }
             }
         }
     }
@@ -739,4 +772,119 @@ fn drawn_stretch(
         }
     }
     plan
+}
+
+/// A long drawing made shorter by `cut` font units: its ink (on the
+/// supersampled field grid placed at `origin`) keeps its left part and
+/// its right end as drawn, and the flat middle between them is squeezed.
+/// `ends` is the ink's left and right edge in font units; the kept parts
+/// are each 0.3 of `short_w`, the short drawing's width. Pieces narrower
+/// than `dot_w` (dots) move with the stroke instead of being squeezed.
+fn shorten(
+    ink: &[bool],
+    cv: &Canvas,
+    origin: (f64, f64),
+    ends: (f64, f64),
+    short_w: f64,
+    cut: f64,
+    dot_w: f64,
+) -> Vec<bool> {
+    let (sw, sh) = (cv.w * SS, cv.h * SS);
+    let per_unit = cv.px_per_unit * SS as f64;
+    let x0 = origin.0 - cv.origin_x / cv.px_per_unit;
+    let unit = |col: f64| x0 + (col + 0.5) / per_unit;
+    let col = |u: f64| (u - x0) * per_unit - 0.5;
+    let (left, right) = ends;
+    let a = left + 0.3 * short_w;
+    let b = right - 0.3 * short_w;
+    let b_out = b - cut;
+    if b_out <= a + 1.0 {
+        return ink.to_vec();
+    }
+    // where a point of the long drawing goes, and where a point of the
+    // shorter one comes from
+    let forward = |u: f64| {
+        if u <= a {
+            u
+        } else if u >= b {
+            u - cut
+        } else {
+            a + (u - a) * (b_out - a) / (b - a)
+        }
+    };
+    let back = |u: f64| {
+        if u <= a {
+            u
+        } else if u >= b_out {
+            u + cut
+        } else {
+            a + (u - a) * (b - a) / (b_out - a)
+        }
+    };
+    // the connected pieces of ink, dots apart from strokes
+    let mut piece = vec![usize::MAX; sw * sh];
+    let mut pieces: Vec<(usize, usize, Vec<usize>)> = Vec::new();
+    for start in 0..sw * sh {
+        if !ink[start] || piece[start] != usize::MAX {
+            continue;
+        }
+        let id = pieces.len();
+        let (mut lo, mut hi, mut cells) = (usize::MAX, 0, Vec::new());
+        let mut stack = vec![start];
+        piece[start] = id;
+        while let Some(at) = stack.pop() {
+            cells.push(at);
+            let (x, y) = (at % sw, at / sw);
+            lo = lo.min(x);
+            hi = hi.max(x);
+            for n in [
+                (x > 0).then(|| at - 1),
+                (x + 1 < sw).then(|| at + 1),
+                (y > 0).then(|| at - sw),
+                (y + 1 < sh).then(|| at + sw),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if ink[n] && piece[n] == usize::MAX {
+                    piece[n] = id;
+                    stack.push(n);
+                }
+            }
+        }
+        pieces.push((lo, hi, cells));
+    }
+    let mut out = vec![false; sw * sh];
+    let mut stroke = vec![false; sw * sh];
+    for (lo, hi, cells) in &pieces {
+        if ((hi - lo + 1) as f64) / per_unit < dot_w {
+            // a dot moves with the stroke under it
+            let mid = (*lo + *hi) as f64 / 2.0;
+            let shift = (col(forward(unit(mid))) - mid).round() as i64;
+            for &at in cells {
+                let (x, y) = ((at % sw) as i64 + shift, at / sw);
+                if x >= 0 && (x as usize) < sw {
+                    out[y * sw + x as usize] = true;
+                }
+            }
+        } else {
+            for &at in cells {
+                stroke[at] = true;
+            }
+        }
+    }
+    // strokes: each output column takes the column it comes from
+    for x in 0..sw {
+        let from = col(back(unit(x as f64))).round();
+        if from < 0.0 || from as usize >= sw {
+            continue;
+        }
+        let from = from as usize;
+        for y in 0..sh {
+            if stroke[y * sw + from] {
+                out[y * sw + x] = true;
+            }
+        }
+    }
+    out
 }
