@@ -507,13 +507,20 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
                 n_shapes += 1;
                 n_rows += 1;
                 // Drawn stretch has two lengths, the short drawing and the
-                // long one. Three in-between rows teach the network the
-                // lengths between: the long drawing with its flat middle
-                // shortened to a quarter, half and three quarters of the
-                // extra length, its ends and dots kept as drawn. The
+                // long one. In-between rows teach the network the lengths
+                // between: the long drawing with its flat middle shortened
+                // in even steps of the extra length (eighths unless
+                // NTF_STRETCH_STEPS says), its ends and dots kept as drawn. The
                 // letter before it keeps its drawing at each pull.
                 if let Some(st) = plan {
-                    for t in [0.25f32, 0.5, 0.75] {
+                    // NTF_STRETCH_STEPS in-between lengths: the network
+                    // only draws a join closed at pulls it has seen nearby
+                    let steps = std::env::var("NTF_STRETCH_STEPS")
+                        .ok()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .filter(|n| *n >= 2)
+                        .unwrap_or(8);
+                    for t in (1..steps).map(|k| k as f32 / steps as f32) {
                         let between = if st.short_w > 0.0 {
                             let bx = ink_box(c, outline.as_ref(), k, cv.px_per_unit).unwrap();
                             let extra = bx.width() - st.short_w;

@@ -23,7 +23,9 @@
 #   gets a stalled run moving but makes strokes heavy, see ba-basic 003),
 #   FROM_VERSION (export again from the training of an older version of
 #   the same name, without training; for a changed header or exporter),
-#   NTF_ONLY (one sample, as "canvas #n", to train from that sample alone),
+#   NTF_ONLY (one sample, as "canvas #n", or one canvas, to train from it alone),
+#   NTF_COND (4 for a font with drawn stretch), NTF_STRETCH_STEPS (8, the
+#   in-between lengths made for each drawn stretch),
 #   NTF_LICENSE and NTF_NOTICE (the license and notice in the font's header),
 #   EM_PX (64, pixels of field per em; the canvas size itself is
 #   measured from the largest labeled letter of the source),
