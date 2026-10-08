@@ -38,18 +38,20 @@ These must work the same way in both viewers.
 ## 3. Shared colors
 
 Each color has one name. The web demo uses the value in the table. Runebender
-uses the theme role, so the color follows the editor's theme.
+uses the theme's own colors: the glyph grid's rainbow mark swatches, edged like
+them, so the marks follow the editor's theme.
 
 | Name | Web demo | Runebender role | Use |
 |---|---|---|---|
 | ground | `#0c0c0c` | proof strip ground | behind everything |
 | ink | `#2aa35f` | proof ink | the letters |
-| strand | `#ef4444` | `danger` | strand, nodes, caret |
-| active | `#f97316` | `selection` | active node, cloud edge |
-| ring | `#facc15` | `pointSelected` | the half-ring |
+| strand | `#ef4444` | rainbow `red` mark | strand, nodes, caret |
+| active | `#f97316` | rainbow `orange` mark | active node, cloud edge |
+| ring | `#facc15` | rainbow `yellow` mark | the half-ring |
 | cloud | `rgba(160,160,160,0.22)` | `previewFill` at 22% | selection fill |
 
-Every mark has a 1 px ground-colored rim, so it stays visible on ink.
+Every mark has a 1 px edge so it stays visible on ink: the ground color on the
+web, the theme's `markOutline` (the darkest base color) in Runebender.
 
 ## 4. Where the viewers differ
 
