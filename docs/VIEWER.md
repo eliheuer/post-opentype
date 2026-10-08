@@ -31,6 +31,7 @@ These must work the same way in both viewers.
 | Active node | The node at the caret. It is larger, filled, and has a rotating half-ring. |
 | Click on ink | Moves the caret to the nearest caret index. |
 | Drag from ink | Selects a range. Field fonts show the selection as a cloud, the union of the selected letters' fields, traced at a raised level. |
+| Typing | Letters and Space insert at the caret, replacing a selection; Backspace and Delete erase; Left goes on through the right-to-left text, Right goes back; Shift extends. A text edit clears the pulls. |
 | Drag a node | A press on any node makes it the active node and drags it in one motion. It pulls that letter and the rest of its word; the join before it stretches. |
 | Opening caret | One node in from the start, after the first letter. |
 | Pulls | Belong to one text. A change to the text clears them. |
@@ -59,7 +60,7 @@ These differences are allowed. Each one comes from the context.
 
 | Web demo | Runebender |
 |---|---|
-| Teaches. The reader types in the canvas itself. | Edits. Text comes from the Neural section's Text field or from the open sample. |
+| Teaches. The reader types in the canvas itself. | Edits. A click on the strip gives it the keyboard, as on the web; Escape gives it back to the editor. The Neural section's Text field shows the same text. |
 | One font, chosen by the page. Controls for precision, tracer, strand and structure view. | A version list in the Neural section. No precision or tracer controls. |
 | Fixed palette (section 3). | Theme palette, so it fits the gray and dark themes. |
 | Fullscreen button. | The strip has the size that the editor layout gives it. |
