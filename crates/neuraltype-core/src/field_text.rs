@@ -459,7 +459,16 @@ pub fn compose_clusters_pulled_with(
         let prev = prev_nb.as_ref().map(|nb| (nb, pull(k)));
         let next = next_nb.as_ref().map(|nb| (nb, pull(k + 1)));
         let (field, done) = if learned {
-            let done = applied(&base[k].field, &g, prev, next);
+            // A font trained on drawn stretch learned its pulls from
+            // drawings, which meet edge to edge rather than overlapping
+            // the way an OpenType font's joins do: every letter with a
+            // neighbor takes the pull, as in training, without looking
+            // for shared ink first.
+            let clamp = |d: (f32, f32)| (d.0.min(g.max_push()), d.1);
+            let done = crate::stretch::Applied {
+                prev: prev.map(|(_, d)| clamp(d)),
+                next: next.map(|(_, d)| clamp(d)),
+            };
             (font.glyph_pulled(clusters[k].feats, done.cond(g.em_px)).field.clone(), done)
         } else {
             pulled(&base[k].field, &g, prev, next)
