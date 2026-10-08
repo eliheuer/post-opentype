@@ -43,6 +43,11 @@ struct Row {
     /// Cluster index in its word; 0 starts a word.
     #[serde(default)]
     index: usize,
+    /// A drawn stretch: the conditioning input this row was drawn at
+    /// (neuraltype_core::stretch::Applied::cond). Rows with one are
+    /// their own training rows, not duplicates of the unstretched one.
+    #[serde(default)]
+    cond: Option<[f32; 4]>,
 }
 
 /// A neighboring cluster in the word a context was first seen in: its
@@ -64,6 +69,8 @@ struct Dataset {
     hand: Vec<bool>,
     /// The clusters before and after, for stretch targets.
     nb: Vec<[Option<Nb>; 2]>,
+    /// Each row's drawn stretch input; zero for most.
+    cond: Vec<[f32; 4]>,
     em_px: f32,
     spread_px: f32,
     vocab: Vec<String>,
@@ -119,10 +126,14 @@ fn load(fields_dir: &str) -> Dataset {
         /// The shape that row had.
         nb_shape: Option<usize>,
     }
-    let mut by_feat: HashMap<[u32; 5], Acc> = HashMap::new();
+    // keyed by context and drawn stretch (in hundredths): a stretched
+    // drawing is its own row
+    type Key = ([u32; 5], [i32; 4]);
+    let quant = |c: [f32; 4]| c.map(|v| (v * 100.0).round() as i32);
+    let mut by_feat: HashMap<Key, Acc> = HashMap::new();
     let text = std::fs::read_to_string(format!("{fields_dir}/dataset.jsonl")).unwrap();
     // the previous line's cluster, when it is in the same word
-    let mut last: Option<([u32; 5], usize)> = None;
+    let mut last: Option<(Key, usize)> = None;
     let px = |units: i32| (units as f32 / upm * em_px).round() as i64;
     for line in text.lines() {
         let r: Row = serde_json::from_str(line).unwrap();
@@ -136,10 +147,11 @@ fn load(fields_dir: &str) -> Dataset {
         // Link this cluster to the one before it in the word. Spaces
         // and word starts break the chain.
         let is_space = r.letters == " ";
+        let key: Key = (f, quant(r.cond.unwrap_or([0.0; 4])));
         let link = if r.index > 0 && !is_space { last } else { None };
-        last = if is_space { None } else { Some((f, r.shape)) };
+        last = if is_space { None } else { Some((key, r.shape)) };
         let n_seen = by_feat.len();
-        let acc = by_feat.entry(f).or_insert_with(|| Acc { first: n_seen, ..Default::default() });
+        let acc = by_feat.entry(key).or_insert_with(|| Acc { first: n_seen, ..Default::default() });
         if r.pri < acc.pri {
             continue;
         }
@@ -167,7 +179,7 @@ fn load(fields_dir: &str) -> Dataset {
                 }
             }
         }
-        let acc = by_feat.get_mut(&f).unwrap();
+        let acc = by_feat.get_mut(&key).unwrap();
         *acc.shapes.entry(r.shape).or_default() += 1;
         if let (Some(dx), Some(dy)) = (r.ddx, r.ddy) {
             acc.dsum[0] += dx as f64 / upm as f64;
@@ -189,9 +201,11 @@ fn load(fields_dir: &str) -> Dataset {
     let mut disp = Vec::new();
     let mut hand = Vec::new();
     let mut nb = Vec::new();
-    let mut tuples: Vec<([u32; 5], Acc)> = by_feat.into_iter().collect();
+    let mut cond = Vec::new();
+    let mut tuples: Vec<(Key, Acc)> = by_feat.into_iter().collect();
     tuples.sort_by_key(|(_, a)| a.first);
-    for (f, acc) in tuples {
+    for ((f, cq), acc) in tuples {
+        cond.push(cq.map(|v| v as f32 / 100.0));
         hand.push(acc.pri > 0);
         nb.push(acc.nb);
         let modal = acc.shapes.iter().max_by_key(|(_, n)| **n).unwrap().0;
@@ -206,7 +220,7 @@ fn load(fields_dir: &str) -> Dataset {
             disp.push([f32::NAN, f32::NAN]);
         }
     }
-    Dataset { feats, shape_ids, disp, hand, nb, em_px, spread_px, vocab, fields, w, h, n_shapes }
+    Dataset { feats, shape_ids, disp, hand, nb, cond, em_px, spread_px, vocab, fields, w, h, n_shapes }
 }
 
 struct Model {
@@ -696,6 +710,11 @@ fn main() -> candle_core::Result<()> {
             let mut cond_t = None;
             let mut weight_t = None;
             let mut target = target;
+            if *COND == 4 && stretch <= 0.0 {
+                // drawn stretch: each row's own input, zero for most
+                let cond: Vec<f32> = chunk.iter().flat_map(|&i| ds.cond[i]).collect();
+                cond_t = Some(Tensor::from_vec(cond, (chunk.len(), 4), &device)?);
+            }
             if stretch > 0.0 {
                 let mut cond = vec![0.0f32; chunk.len() * 4];
                 let mut flat: Option<Vec<f32>> = None;

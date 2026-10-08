@@ -257,8 +257,8 @@ fn clipped(ink: &[bool], sw: usize, sh: usize) -> bool {
 /// `canvas #n`. A sample that is not ready stops the run with the
 /// reason: training must not quietly skip work.
 ///
-/// NTF_ONLY names one sample, as `canvas #n`, to train from that
-/// sample alone: a short run to check one drawing.
+/// NTF_ONLY names one sample, as `canvas #n`, or one canvas, to train
+/// from it alone: a short run to check one drawing or one study.
 fn nufo_phrases(path: &str) -> Vec<(String, Phrase)> {
     let source = nufo::Source::load(std::path::Path::new(path)).unwrap_or_else(|e| panic!("{e}"));
     let only = std::env::var("NTF_ONLY").ok().filter(|only| !only.is_empty());
@@ -266,7 +266,8 @@ fn nufo_phrases(path: &str) -> Vec<(String, Phrase)> {
     for canvas in &source.canvases {
         for (n, sample) in canvas.item.samples.iter().enumerate() {
             let name = format!("{} #{}", canvas.name, n + 1);
-            if only.as_deref().is_some_and(|only| only != name) {
+            // "canvas #n" is one sample; "canvas" is all of that canvas's
+            if only.as_deref().is_some_and(|only| only != name && only != canvas.name) {
                 continue;
             }
             let prepared = nufo::training::prepare(sample, &canvas.contours)
@@ -346,6 +347,18 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
             phrases.push((path.clone(), phrase));
         }
     }
+    // Drawn stretch: the same letter, with the same neighbors, drawn
+    // short and long. The shortest is stretch 0; each longer one becomes
+    // a training row whose stretch input is its extra length, pulled on
+    // its join with the letter before, as a dragged node pulls it. Its
+    // target sits so its far end lines up with the short one's, because
+    // the engine moves a pulled letter's origin by the pull. The letter
+    // before it gets the same pull on its other side. Only letters with
+    // a letter before them in the word have a join to pull.
+    let stretch = drawn_stretch(&phrases, upm, cv.px_per_unit);
+    if !stretch.is_empty() {
+        println!("drawn stretch: {} rows", stretch.len());
+    }
     // A base with no shapes and `"auto_canvas": true` takes its canvas
     // from the phrases: large enough for the largest cluster's ink, with
     // the field's spread around it. The source decides the size, so a
@@ -355,17 +368,28 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
         assert_eq!(base_shapes, 0, "auto_canvas needs a base with no shapes");
         let (mut max_w, mut max_h) = (0.0f64, 0.0f64);
         let mut largest = String::new();
-        for (path, phrase) in &phrases {
+        for (pi, (path, phrase)) in phrases.iter().enumerate() {
             let k = upm / phrase.upm;
             let outline =
                 phrase.outline.as_deref().map(|d| kurbo::BezPath::from_svg(d).expect("outline"));
-            for c in lay_out(path, phrase).1.iter().flatten() {
-                if let Some(ink) = ink_box(c, outline.as_ref(), k, cv.px_per_unit) {
-                    if ink.width() > max_w {
-                        largest = format!("{} in {:?}", c.letters, phrase.text);
+            for (wi, word) in lay_out(path, phrase).1.iter().enumerate() {
+                for (ci, c) in word.iter().enumerate() {
+                    if let Some(ink) = ink_box(c, outline.as_ref(), k, cv.px_per_unit) {
+                        // a stretched row reaches past its origin by its
+                        // length less half the short one's: twice that
+                        // is the width it needs
+                        let reach = match stretch.get(&(pi, wi, ci)) {
+                            Some(st) if st.short_w > 0.0 => {
+                                2.0 * (ink.width() - st.short_w / 2.0).max(ink.width() / 2.0)
+                            }
+                            _ => ink.width(),
+                        };
+                        if reach > max_w {
+                            largest = format!("{} in {:?}", c.letters, phrase.text);
+                        }
+                        max_w = max_w.max(reach);
+                        max_h = max_h.max(ink.height());
                     }
-                    max_w = max_w.max(ink.width());
-                    max_h = max_h.max(ink.height());
                 }
             }
         }
@@ -390,7 +414,7 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
     fields_bin.extend(sdf_from_grid(&vec![false; cv.w * SS * cv.h * SS], cv.w, cv.h, SS, cv.spread_px));
     n_shapes += 1;
 
-    for (path, phrase) in &phrases {
+    for (pi, (path, phrase)) in phrases.iter().enumerate() {
         let path = path.as_str();
         let k = upm / phrase.upm;
         let outline = phrase.outline.as_deref().map(|d| kurbo::BezPath::from_svg(d).expect("outline"));
@@ -445,7 +469,17 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
             let mut prev = (wx, wy);
             for (ci, (c, &(a, b))) in clusters.iter().zip(&ranges).enumerate() {
                 let (ox, oy) = origins[wi][ci];
-                let ink = cluster_ink(c, (ox, oy), outline.as_ref(), k, &cv);
+                let plan = stretch.get(&(pi, wi, ci));
+                // a stretched letter's target lines its far end up with
+                // the short one's; the chain keeps its own origin
+                let field_origin = match plan {
+                    Some(st) if st.short_w > 0.0 => {
+                        let ink = ink_box(c, outline.as_ref(), k, cv.px_per_unit).unwrap();
+                        (ink.x0 + st.short_w / 2.0, oy)
+                    }
+                    _ => (ox, oy),
+                };
+                let ink = cluster_ink(c, field_origin, outline.as_ref(), k, &cv);
                 if !ink.iter().any(|&v| v) {
                     eprintln!("warning: {path}: cluster {:?} in {:?} has no ink", c.letters, phrase.text);
                 }
@@ -463,6 +497,7 @@ pub fn hand(base_dir: &str, out_dir: &str, phrase_paths: &[String]) {
                     "next": chars.get(b), "next2": chars.get(b + 1),
                     "index": ci, "shape": n_shapes, "pri": 1,
                     "ddx": (ox - prev.0).round() as i32, "ddy": (oy - prev.1).round() as i32,
+                    "cond": plan.map(|st| st.cond),
                 })
                 .to_string();
                 dataset.push('\n');
@@ -641,4 +676,67 @@ pub fn faces(font_path: &str) {
             println!("{i}  {name}  upm {}", face.units_per_em());
         }
     }
+}
+
+/// One row's drawn stretch: its conditioning input, and for the long
+/// letter itself the width of the short one it stretches (0 for the
+/// letter before it, which keeps its own drawing).
+struct Stretch {
+    cond: [f32; 4],
+    short_w: f64,
+}
+
+/// Every drawn stretch in the phrases, by (phrase, word, cluster).
+fn drawn_stretch(
+    phrases: &[(String, Phrase)],
+    upm: f64,
+    px_per_unit: f64,
+) -> std::collections::HashMap<(usize, usize, usize), Stretch> {
+    use neuraltype_core::stretch::COND_SCALE;
+    type Context = (Option<char>, Option<char>, String, Option<char>, Option<char>);
+    let mut by_context: std::collections::HashMap<Context, Vec<((usize, usize, usize), f64)>> =
+        Default::default();
+    for (pi, (path, phrase)) in phrases.iter().enumerate() {
+        let k = upm / phrase.upm;
+        let outline =
+            phrase.outline.as_deref().map(|d| kurbo::BezPath::from_svg(d).expect("outline"));
+        let (words, laid) = lay_out(path, phrase);
+        for (wi, (chars, clusters)) in words.iter().zip(&laid).enumerate() {
+            for (ci, (c, &(a, b))) in clusters.iter().zip(&cluster_ranges(chars)).enumerate() {
+                // only a letter with one before it in the word has a join
+                if ci == 0 {
+                    continue;
+                }
+                let Some(ink) = ink_box(c, outline.as_ref(), k, px_per_unit) else {
+                    continue;
+                };
+                let context = (
+                    if a >= 2 { Some(chars[a - 2]) } else { None },
+                    Some(chars[a - 1]),
+                    c.letters.clone(),
+                    chars.get(b).copied(),
+                    chars.get(b + 1).copied(),
+                );
+                by_context.entry(context).or_default().push(((pi, wi, ci), ink.width()));
+            }
+        }
+    }
+    let mut plan = std::collections::HashMap::new();
+    for instances in by_context.values() {
+        let short = instances.iter().map(|(_, w)| *w).fold(f64::MAX, f64::min);
+        for &((pi, wi, ci), w) in instances {
+            let extra = w - short;
+            // a few percent longer is the same drawing
+            if extra < 0.12 * upm {
+                continue;
+            }
+            // the pull, in the engine's units: pixels times COND_SCALE
+            // per em, negative for leftward (apart) in right-to-left text
+            let pull = -(extra / upm) as f32 * COND_SCALE;
+            let _ = px_per_unit;
+            plan.insert((pi, wi, ci), Stretch { cond: [pull, 0.0, 0.0, 0.0], short_w: short });
+            plan.insert((pi, wi, ci - 1), Stretch { cond: [0.0, 0.0, pull, 0.0], short_w: 0.0 });
+        }
+    }
+    plan
 }
