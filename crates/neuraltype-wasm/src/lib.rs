@@ -302,7 +302,8 @@ fn shape_field(
             .skip(pw.char_base)
             .take(pw.n_chars)
             .collect();
-        let word_has_offsets = (pw.char_base..pw.char_base + pw.n_chars)
+        // the end node pulls the word's last letter, so it counts too
+        let word_has_offsets = (pw.char_base..=pw.char_base + pw.n_chars)
             .any(|i| offsets.contains_key(&i));
         let cached = if quality { traces.borrow().get(&word_str).cloned() } else { None };
         // never trace img2bez inside shape(): typing stays instant on
